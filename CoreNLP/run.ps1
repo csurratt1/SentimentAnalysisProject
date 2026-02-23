@@ -8,8 +8,9 @@
 #   .\run.ps1 -Parse ..\input\file.txt # speaker turn parsing only (no CoreNLP)
 #   .\run.ps1 -Parse ..\input\file.docx
 #   .\run.ps1 -Resolve ..\input\file.txt  # target resolution (who speaks to whom)
-#   .\run.ps1 -Resolve ..\input\file.docx
-# ---------------------------------------------------------------------------
+#   .\run.ps1 -Resolve ..\input\file.docx#   .\run.ps1 -Score .\input\file.txt    # full pipeline: parse + resolve + CoreNLP scoring
+#   .\run.ps1 -Score .\input\file.docx
+#   .\run.ps1 -Score -v .\input\file.docx # scoring with per-turn detail# ---------------------------------------------------------------------------
 
 $ErrorActionPreference = "Stop"
 
@@ -106,9 +107,13 @@ $parseMode  = $false
 # Check for mode flags
 $fileArgs = @()
 $resolveMode = $false
+$scoreMode   = $false
+$verboseMode = $false
 foreach ($a in $args) {
     if ($a -eq "-Parse")   { $parseMode = $true }
     elseif ($a -eq "-Resolve") { $resolveMode = $true }
+    elseif ($a -eq "-Score")   { $scoreMode = $true }
+    elseif ($a -eq "-v")       { $verboseMode = $true }
     else { $fileArgs += $a }
 }
 
@@ -130,7 +135,7 @@ if ($fileArgs.Count -gt 0) {
 }
 
 # -- Run --------------------------------------------------------------------
-$mainClass = if ($resolveMode) { "TargetResolver" } elseif ($parseMode) { "SpeakerTurnParser" } else { "SentimentTest" }
+$mainClass = if ($scoreMode) { "TurnScorer" } elseif ($resolveMode) { "TargetResolver" } elseif ($parseMode) { "SpeakerTurnParser" } else { "SentimentTest" }
 Write-Host "[2/2] Running $mainClass..."
 Write-Host ""
 
@@ -139,6 +144,15 @@ $javaArgs = @(
     "-cp", $cp,
     $mainClass
 )
+
+if ($verboseMode -and $scoreMode) { $javaArgs += "-v" }
+
+# For Score mode, always write structured output to output/
+if ($scoreMode) {
+    $outputPath = Join-Path $scriptDir "..\output"
+    if (-not (Test-Path $outputPath)) { New-Item -ItemType Directory -Path $outputPath | Out-Null }
+    $javaArgs += @("-o", (Resolve-Path $outputPath).Path)
+}
 
 if ($inputArg) { $javaArgs += $inputArg }
 
