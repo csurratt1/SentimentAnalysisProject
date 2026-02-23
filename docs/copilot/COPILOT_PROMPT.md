@@ -70,30 +70,83 @@ This system ingests U.S. Senate Judiciary Committee confirmation hearing transcr
 
 ### What I need you to generate:
 
-Generate the **complete file and directory structure** for this project as a Maven Java project. Create all the files with:
-- Proper package declarations
-- Class/interface declarations with JavaDoc describing purpose
-- Method signatures (no implementations yet — just signatures with TODO comments)
-- Proper imports where obvious
-- Indicate which classes depend on which
+> **DO NOT scaffold the entire project at once.** This is a year-long research project
+> built incrementally. Only generate code for the current phase. Each phase should
+> compile and run before moving to the next.
 
-The structure should follow standard Maven conventions (`src/main/java`, `src/main/resources`, `src/test/java`) and organize code into these packages:
-- `edu.concordia.sentiment` — main App entry point
-- `edu.concordia.sentiment.config` — configuration and properties loading
-- `edu.concordia.sentiment.model` — POJOs/data classes (Hearing, Speaker, Nominee, Turn, PrecedentReference)
-- `edu.concordia.sentiment.ingest` — document reading (DocxParser, TranscriptIngestor)
-- `edu.concordia.sentiment.parse` — speaker identification and turn segmentation
-- `edu.concordia.sentiment.legal` — precedent detection and legal reference extraction
-- `edu.concordia.sentiment.sentiment` — CoreNLP integration, rule-based scoring, aggregation
-- `edu.concordia.sentiment.db` — DAO layer, connection pool, schema management
-- `edu.concordia.sentiment.batch` — batch processing, progress tracking
-- `edu.concordia.sentiment.util` — shared utilities (text cleaning, etc.)
+### Current Phase: Phase 1 — Smoke Test & .docx Ingest
 
-Also include:
-- `pom.xml` with all dependencies
-- `src/main/resources/application.properties` template
-- `src/main/resources/precedents.json` structure for the case dictionary
-- `scripts/schema.sql` for MySQL table creation
-- `data/input/` directory (with a `.gitkeep`)
-- `README.md` skeleton
-- `.gitignore` for Java/Maven
+**Status:** CoreNLP sentiment pipeline compiles and runs. Speaker turn segmentation
+and target resolution are both scaffolded and tested against a real 200K-char GPO
+hearing transcript. Every speaker turn is resolved to a specific nominee target.
+
+**What exists:**
+- `CoreNLP/SentimentTest.java` — working sentence-level sentiment (5-class label + [-2,+2] score)
+- `CoreNLP/SpeakerTurn.java` — model POJO for a speaker turn (title, lastName, text, turnNumber, startLine)
+- `CoreNLP/SpeakerTurnParser.java` — regex state machine that segments transcript text into speaker turns; handles TOC filtering, annotation skipping, multi-line continuation; standalone runner with built-in test data
+- `CoreNLP/NomineeInfo.java` — lightweight model for a nominee (firstName, lastName, position, titleUsed); `matchesLastName()` for case-insensitive lookup
+- `CoreNLP/HearingSection.java` — represents one nominee panel (date, nominees map, line range); `containsLine()` and `findNominee()` for lookup
+- `CoreNLP/ResolvedTarget.java` — result of target resolution for a turn (nominee, method enum, confidence 0.0–1.0); methods: SELF, DIRECT_ADDRESS, RESPONSE_PAIR, PRIOR_CONTEXT, SECTION_DEFAULT, UNKNOWN
+- `CoreNLP/TargetResolver.java` — 5-layer resolution strategy determining WHO each speaker turn is directed at; detects NOMINATIONS headers, parses nominee names from headers, corrects titles from transcript usage, outputs interaction matrix
+- `CoreNLP/run.ps1` — compiles all Java sources, extracts `.docx` → plain text, 3 modes: default (`SentimentTest`), `-Parse` (`SpeakerTurnParser`), `-Resolve` (`TargetResolver`)
+- `input/` — drop folder for `.docx` test documents + `qa_exchange_test.txt` (multi-speaker excerpt)
+- `lib/stanford-corenlp/` — local CoreNLP 4.5.10 JARs (gitignored)
+
+**Validated results (full hearing document — PN908 S.Hrg. 111-695, Pt. 3):**
+- 400 speaker turns parsed, 28 unique speakers, 165,522 chars of speech
+- 3 hearing sections detected (July 29, Sept 9, Sept 23, 2009), 12 nominees across 3 panels
+- 400/400 turns resolved to targets (0 UNKNOWN):
+  - SELF: 152 (nominee speaking — confidence 1.0)
+  - RESPONSE_PAIR: 103 (nominee responds after senator — 0.90)
+  - PRIOR_CONTEXT: 79 (inherits target from ongoing Q&A — 0.70)
+  - DIRECT_ADDRESS: 46 (speaker names nominee in text — 0.95)
+  - SECTION_DEFAULT: 20 (falls back to panel — 0.30–0.50)
+- Top speakers: Senator Sessions (61 turns, 23K chars), Senator Whitehouse (46), Senator Franken (43), Chairman Leahy (34)
+
+**Target resolution strategy (priority order):**
+1. **SELF** — speaker IS a nominee on the current panel
+2. **DIRECT_ADDRESS** — speaker names a nominee in their text ("Judge Chen, let me ask...")
+3. **RESPONSE_PAIR** — nominee responds immediately after a senator's turn
+4. **PRIOR_CONTEXT** — inherits target from ongoing Q&A exchange between same senator
+5. **SECTION_DEFAULT** — falls back to panel (single nominee = 0.50, multi = 0.30)
+
+**Known parser limitations to address later:**
+- Standalone speaker names used as section intros create small bogus turns
+- ALL-CAPS section headings between speakers get absorbed as turn text
+- `[Off microphone.]` turns have no useful content (use `hasSubstantiveText()` to filter)
+
+**Next milestones (in order):**
+1. Wire CoreNLP per-turn scoring — score each turn's text, aggregate by (senator, nominee) pairs
+2. Output views: Nominee Scorecard, Senator Voting Profile, Precedent Heat Map
+3. Add Apache POI `.docx` reading in Java (replace PowerShell extraction)
+4. Speaker alias resolution (e.g., "Ranking Member Sessions" → "Senator Sessions")
+5. Legal precedent detection (regex + dictionary — find case references)
+6. Rule-based scoring layer (hostile question patterns, supportive framing)
+
+**Do not build yet:**
+- MySQL / database layer
+- Batch processing
+- Interactive viewer
+- Full Maven project scaffold with all packages
+
+### Future Phases (for context only — do not implement):
+
+**Phase 2 — Per-Speaker Scoring & Output**
+- Wire CoreNLP sentiment into speaker turns with target resolution
+- Aggregate scores by (senator, nominee) pairs
+- Output: Nominee Scorecard (sorted by party then score), Senator Voting Profile, Precedent Heat Map
+- Apache POI for `.docx` reading in Java (replace PowerShell extraction)
+
+**Phase 3 — Legal Precedent Detection & Dual-Target Scoring**
+- Precedent dictionary (`precedents.json`)
+- Regex + dictionary detection of case references
+- Windowed sentiment around precedent mentions
+- Rule-based scoring layer
+
+**Phase 4 — Database & Batch Processing**
+- MySQL schema, DAO layer, HikariCP
+- Batch processing with idempotent re-runs
+- Progress tracking
+
+**Phase 5 — Interactive Viewer**
+- Front-end to browse results by hearing, nominee, senator, or precedent

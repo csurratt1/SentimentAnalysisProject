@@ -1,1 +1,32 @@
+# ── Dependencies (large JARs, not committed) ──
 lib/
+
+# ── Build output ──
+CoreNLP/out/
+target/
+*.class
+
+# ── IDE / editor ──
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+*.swp
+*~
+
+# ── OS junk ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Maven / Gradle ──
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# ── Temp files from .docx extraction ──
+corenlp_docx_*/
+corenlp_input_*
