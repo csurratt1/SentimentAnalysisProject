@@ -1,9 +1,9 @@
-# ── Dependencies (large JARs, not committed) ──
+# ── Dependencies (Maven manages these now) ──
 lib/
 
 # ── Build output ──
-CoreNLP/out/
 target/
+CoreNLP/out/
 *.class
 
 # ── IDE / editor ──
@@ -21,11 +21,14 @@ target/
 Thumbs.db
 desktop.ini
 
-# ── Maven / Gradle ──
+# ── Maven ──
 dependency-reduced-pom.xml
 buildNumber.properties
 .mvn/timing.properties
 .mvn/wrapper/maven-wrapper.jar
+
+# ── Database credentials (never commit) ──
+db.properties
 
 # ── Temp files from .docx extraction ──
 corenlp_docx_*/

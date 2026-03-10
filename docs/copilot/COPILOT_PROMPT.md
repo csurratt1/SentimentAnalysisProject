@@ -23,7 +23,7 @@ This system ingests U.S. Senate Judiciary Committee confirmation hearing transcr
    - **Precedent Sentiment Scoring** — (planned) When a legal precedent is referenced, score the speaker's stance toward that precedent.
    - **Rule-based scoring layer** — (planned) Pattern matching for hostile question types, supportive framing, and precedent stance signals.
 
-5. **SQL Database Storage** — (planned) All parsed data, speaker turns, legal references, and sentiment scores will be stored in a relational database. JSON is the current intermediate format.
+5. **SQL Database Storage** — MySQL 8.0 with `DatabaseManager` (reusable JDBC class) and `Hearing` entity (full CRUD). Schema in `sql/schema.sql`. Additional entity tables (speakers, nominees, turns, sentiment) planned. JSON remains the intermediate format for NLP output; database stores structured metadata.
 
 6. **Batch Processing** — (planned) Process hundreds of transcripts from a configurable input directory.
 
@@ -31,17 +31,16 @@ This system ingests U.S. Senate Judiciary Committee confirmation hearing transcr
 
 ### Tech Stack (current):
 - **Language:** Java 17.0.9 (Oracle JDK, build 17.0.9+11-LTS-201)
-- **NLP Engine:** Stanford CoreNLP 4.5.10 — 18 JARs in `lib/stanford-corenlp/stanford-corenlp-4.5.10/`
+- **Build:** Maven 3.9.6 via Maven Wrapper (`mvnw.cmd`) — no global Maven install required. `pom.xml` manages all dependencies.
+- **NLP Engine:** Stanford CoreNLP 4.5.10 — pulled from Maven Central (core + models + models-english). All 30 dependency JARs resolved to `~/.m2/repository/`.
 - **Parser:** Shift-Reduce beam parser (`englishSR.beam.ser.gz`) — O(n) linear time, ~17-26 sec load, F1 88.6. Requires `stanford-corenlp-4.5.10-models-english.jar` (424 MB, English extra models, not in default models JAR).
 - **JSON Processing:** `javax.json` 1.1.6 (GlassFish implementation) — **ships with CoreNLP** in `jakarta.json-1.1.6.jar`. NOTE: JAR filename says "jakarta" but internal package is `javax.json.*` (pre-namespace-migration).
+- **Database:** MySQL 8.0 (local instance). Driver: `mysql-connector-j` 8.0.33 (from Maven). Database: `sentiment_analysis`. Credentials stored in `db.properties` (gitignored).
 - **Document Parsing:** PowerShell `.docx → .txt` extraction (inline in `run.ps1` via .NET System.IO.Compression)
-- **Build:** Direct `javac` compilation (no Maven/Gradle). Sources compiled to `CoreNLP/out/`.
 - **OS:** Windows, PowerShell 5.1 (NOT PowerShell 7 — `utf8NoBOM` encoding not available)
 
 ### Tech Stack (planned — not yet integrated):
 - **Document Parsing:** Apache POI (for native Java `.docx` reading)
-- **Database:** SQL (engine TBD — MySQL or SQLite)
-- **Build:** Maven (eventual migration from javac)
 - **Testing:** JUnit 5
 - **Logging:** SLF4J with slf4j-simple
 
@@ -54,12 +53,17 @@ This system ingests U.S. Senate Judiciary Committee confirmation hearing transcr
     → TurnScorer (CoreNLP SR parser + sentiment — per-turn scoring)
     → Aggregation (by senator→nominee interaction pairs)
     → Output: JSON + TXT reports (output/)
+    → (planned) DatabaseManager → MySQL (structured storage)
 ```
 
 ### Project structure:
 ```
 SentimentAnalysisProject/
-├── CoreNLP/                    # Java source files (all in default package)
+├── pom.xml                     # Maven project descriptor (CoreNLP 4.5.10, mysql-connector-j 8.0.33)
+├── mvnw.cmd                    # Maven Wrapper script (no global Maven install needed)
+├── .mvn/wrapper/               # Maven Wrapper support files (maven-wrapper.jar, .properties)
+├── db.properties               # MySQL credentials — GITIGNORED, never committed
+├── src/main/java/              # All Java sources (default package)
 │   ├── SentimentTest.java      # Standalone sentence-level sentiment smoke test
 │   ├── SpeakerTurn.java        # POJO: speaker turn (title, lastName, text, turnNumber, startLine)
 │   ├── SpeakerTurnParser.java  # Regex state machine: transcript → List<SpeakerTurn>
@@ -67,10 +71,14 @@ SentimentAnalysisProject/
 │   ├── HearingSection.java     # POJO: one nominee panel (date, nominees, line range)
 │   ├── ResolvedTarget.java     # Result of target resolution (nominee, method, confidence)
 │   ├── TargetResolver.java     # 5-layer resolution: SELF → DIRECT → RESPONSE → CONTEXT → DEFAULT
-│   ├── ScoredTurn.java         # Wraps ResolvedTarget + sentiment scores (sentenceCount, totalScore, avgScore, weightedScore)
-│   ├── TurnScorer.java         # Full pipeline: parse → resolve → CoreNLP score → aggregate → report + JSON
-│   ├── run.ps1                 # Compiler + runner: -Parse, -Resolve, -Score modes
-│   └── out/                    # Compiled .class files (gitignored)
+│   ├── ScoredTurn.java         # Wraps ResolvedTarget + sentiment scores
+│   ├── TurnScorer.java         # Full pipeline: parse → resolve → CoreNLP score → aggregate → JSON + TXT
+│   ├── DatabaseManager.java    # Reusable DB class: connect, disconnect, execute (parameterized queries)
+│   └── Hearing.java            # Hearing entity with CRUD: save, load, loadAll, delete
+├── sql/
+│   └── schema.sql              # CREATE DATABASE + CREATE TABLE hearings (run once to bootstrap)
+├── CoreNLP/
+│   └── run.ps1                 # Compiler + runner: uses mvnw.cmd, -Parse/-Resolve/-Score modes
 ├── input/                      # Transcript files (.docx, .txt)
 │   ├── hearing_text.txt        # Full test hearing (PN908 S.Hrg. 111-695, Pt. 3)
 │   ├── qa_exchange_test.txt    # Small multi-speaker excerpt for smoke tests
@@ -80,13 +88,9 @@ SentimentAnalysisProject/
 │   ├── score_YYYY-MM-DD_HHmmss.txt   # Timestamped human-readable report
 │   ├── score_latest.json              # Latest run (copied for easy access)
 │   └── score_latest.txt               # Latest run (copied for easy access)
-├── lib/stanford-corenlp/       # CoreNLP 4.5.10 JARs (gitignored)
-│   └── stanford-corenlp-4.5.10/
-│       ├── stanford-corenlp-4.5.10.jar
-│       ├── stanford-corenlp-4.5.10-models.jar
-│       ├── stanford-corenlp-4.5.10-models-english.jar  # 424 MB — SR parser models
-│       ├── jakarta.json-1.1.6.jar                      # javax.json (JSON-P 1.1) 
-│       └── ... (18 JARs total)
+├── target/                     # Maven build output (gitignored)
+│   ├── classes/                # Compiled .class files
+│   └── cp.txt                  # Maven dependency classpath (generated by run.ps1)
 ├── docs/copilot/
 │   └── COPILOT_PROMPT.md       # This file
 └── .gitignore
@@ -132,7 +136,23 @@ and output to both structured JSON and human-readable TXT reports.
   - Writes `output/score_<timestamp>.json` — structured JSON via `javax.json` builders
   - Writes `output/score_<timestamp>.txt` — human-readable report
   - Copies both to `score_latest.json` / `score_latest.txt`
+- **DatabaseManager.java** (~270 lines) — Reusable database class (satisfies CSC 470 Lab 01):
+  - `connect()` — opens JDBC connection using `db.properties` (host, port, name, user, password)
+  - `disconnect()` — closes connection and cleans up resources
+  - `execute(String sql, Map<Integer, Object> params)` — parameterized INSERT/UPDATE/DELETE, returns affected rows
+  - `executeQuery(String sql, Map<Integer, Object> params)` — parameterized SELECT, returns `List<Map<String, Object>>`
+  - `executeInsert(String sql, Map<Integer, Object> params)` — INSERT returning generated key
+  - Loads credentials from `db.properties` (searches current dir, then parent dir)
+  - JDBC URL: `jdbc:mysql://host:port/dbName?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC`
+- **Hearing.java** (~215 lines) — Hearing entity with full CRUD:
+  - Fields: `id` (int, 0=new), `hearingDate`, `session`, `serialNumber`, `committee`, `sourceFile`, `title`
+  - `save(DatabaseManager db)` — INSERT if id==0, UPDATE if id>0; sets `this.id` from generated key
+  - `load(DatabaseManager db, int id)` — static, SELECT by PK, returns Hearing or null
+  - `loadAll(DatabaseManager db)` — static, returns `List<Hearing>`
+  - `delete(DatabaseManager db, int id)` — static, DELETE by PK, returns boolean
+  - Maps to `hearings` table (see `sql/schema.sql`)
 - **run.ps1** (~165 lines) — Compiler + runner with 4 modes:
+  - Uses `mvnw.cmd compile` for compilation, `mvnw.cmd dependency:build-classpath` for classpath
   - Default: `SentimentTest`
   - `-Parse`: `SpeakerTurnParser`
   - `-Resolve`: `TargetResolver`
@@ -242,18 +262,20 @@ approach options, and my sign-off before any code is written.
 3. **Legal precedent detection** — Regex + dictionary approach to find case references (`"Roe v. Wade"`, `"554 U.S. 570"`, `"14th Amendment"`, `"stare decisis"`). Needs a `precedents.json` dictionary of ~200 landmark cases.
 4. **Rule-based scoring layer** — Pattern matching for hostile question types (`"Isn't it true that..."`, `"How can you justify..."`), supportive framing (`"Your impressive record..."`), and precedent stance signals (`"wrongly decided"`, `"settled law"`). Would supplement CoreNLP's tree-based sentiment.
 5. **Windowed precedent sentiment** — When a legal precedent is referenced, score the speaker's stance using a ±2-sentence window around the mention.
+6. **Additional CRUD entities** — Expand database layer with more entity classes (speakers, nominees, turns, sentiment scores, precedent references) following the same DatabaseManager + POJO CRUD pattern as Hearing.java.
 
 **Medium-term (infrastructure):**
-6. **SQL database layer** — Schema design, DAO pattern, connection pooling. JSON is currently the intermediate format; data will eventually flow into SQL. Engine (MySQL vs SQLite) not yet decided.
 7. **Batch processing** — Process multiple transcripts from a configurable input directory. Idempotent re-processing, error recovery, progress tracking.
-8. **Maven migration** — Move from direct `javac` to Maven for proper dependency management, testing framework, and build reproducibility.
+8. **Pipeline-to-database integration** — Wire TurnScorer output directly into MySQL via DatabaseManager. Currently JSON is the intermediate format; the pipeline should also persist to SQL.
 
 **Long-term (visualization):**
 9. **Interactive viewer** — Front-end to browse results by hearing, nominee, senator, or precedent. Architecture undecided (web-based vs. local desktop app).
 
 ### Key design principles:
 - **Pipeline pattern** — each processing stage is a separate class that can run independently
+- **Maven-managed dependencies** — all JARs from Maven Central via `pom.xml`, no manual JAR downloads. Maven Wrapper (`mvnw.cmd`) ensures reproducible builds with no global install.
 - **Leverage CoreNLP-bundled libraries** — javax.json, ejml, joda-time, protobuf, etc. are all available without adding external dependencies
 - **JSON as intermediate format** — keeps all doors open for SQL, pandas, web dashboards
+- **DatabaseManager pattern** — single reusable class for all DB operations. Entity classes (Hearing, etc.) use `save(db)` / `load(db, id)` / `delete(db, id)` CRUD pattern.
 - **Incremental build** — each phase compiles and runs before moving to the next
 - **Consult before deciding** — always present options and get approval before logic/architecture choices

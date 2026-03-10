@@ -1,5 +1,5 @@
 ﻿# ---------------------------------------------------------------------------
-# run.ps1 - Compile and run Java classes against local CoreNLP JARs
+# run.ps1 - Compile and run Java classes via Maven
 #
 # Usage:
 #   .\run.ps1                          # sentiment test with built-in sample
@@ -8,9 +8,11 @@
 #   .\run.ps1 -Parse ..\input\file.txt # speaker turn parsing only (no CoreNLP)
 #   .\run.ps1 -Parse ..\input\file.docx
 #   .\run.ps1 -Resolve ..\input\file.txt  # target resolution (who speaks to whom)
-#   .\run.ps1 -Resolve ..\input\file.docx#   .\run.ps1 -Score .\input\file.txt    # full pipeline: parse + resolve + CoreNLP scoring
-#   .\run.ps1 -Score .\input\file.docx
-#   .\run.ps1 -Score -v .\input\file.docx # scoring with per-turn detail# ---------------------------------------------------------------------------
+#   .\run.ps1 -Resolve ..\input\file.docx
+#   .\run.ps1 -Score ..\input\file.txt    # full pipeline: parse + resolve + CoreNLP scoring
+#   .\run.ps1 -Score ..\input\file.docx
+#   .\run.ps1 -Score -v ..\input\file.docx # scoring with per-turn detail
+# ---------------------------------------------------------------------------
 
 $ErrorActionPreference = "Stop"
 
@@ -55,49 +57,38 @@ function Extract-TextFromDocx {
 }
 
 # -- Paths ------------------------------------------------------------------
-$scriptDir = $PSScriptRoot
-$libDir    = Join-Path $scriptDir "..\lib\stanford-corenlp\stanford-corenlp-4.5.10"
-$outDir    = Join-Path $scriptDir "out"
+$scriptDir  = $PSScriptRoot
+$projectDir = (Resolve-Path (Join-Path $scriptDir "..")).Path
+$mvnw       = Join-Path $projectDir "mvnw.cmd"
 
-# -- Build classpath from all JARs in the lib dir --------------------------
-$jars = Get-ChildItem -Path $libDir -Filter "*.jar" |
-        Where-Object { $_.Name -notmatch "-sources|-javadoc" } |
-        Select-Object -ExpandProperty FullName
-
-if (-not $jars) {
-    Write-Error "No JARs found in $libDir"
-    exit 1
+# -- Compile via Maven ------------------------------------------------------
+Write-Host ""
+Write-Host "[1/2] Compiling with Maven..."
+Push-Location $projectDir
+try {
+    & $mvnw compile -q
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Maven compilation failed."
+        exit 1
+    }
+} finally {
+    Pop-Location
 }
-
-# On Windows, classpath entries are separated by semicolons
-$cp = ($jars -join ";") + ";$outDir"
-
-Write-Host ""
-Write-Host "Using $($jars.Count) JARs from: $libDir"
+Write-Host "    Compilation succeeded."
 Write-Host ""
 
-# -- Create output directory ------------------------------------------------
-if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
-
-# -- Compile ----------------------------------------------------------------
-Write-Host "[1/2] Compiling Java sources..."
-$srcFiles = Get-ChildItem -Path $scriptDir -Filter "*.java" | Select-Object -ExpandProperty FullName
-
-$javacArgs = @(
-    "-encoding", "UTF-8",
-    "-source",   "17",
-    "-target",   "17",
-    "-cp",       $cp,
-    "-d",        $outDir
-) + $srcFiles
-
-& javac @javacArgs
+# -- Build classpath from Maven dependencies --------------------------------
+# Maven stores compiled classes in target/classes and dependencies in ~/.m2/
+Push-Location $projectDir
+$cpOutput = & $mvnw -q dependency:build-classpath "-Dmdep.outputFile=target/cp.txt" 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "Compilation failed."
+    Write-Error "Failed to resolve Maven classpath."
+    Pop-Location
     exit 1
 }
-Write-Host "    Compilation succeeded -> $outDir"
-Write-Host ""
+$depCp = Get-Content (Join-Path $projectDir "target\cp.txt") -Raw
+$cp = (Join-Path $projectDir "target\classes") + ";" + $depCp.Trim()
+Pop-Location
 
 # -- Resolve input file (handle .docx) ------------------------------------
 $inputArg   = $null
@@ -110,7 +101,7 @@ $resolveMode = $false
 $scoreMode   = $false
 $verboseMode = $false
 foreach ($a in $args) {
-    if ($a -eq "-Parse")   { $parseMode = $true }
+    if ($a -eq "-Parse")       { $parseMode = $true }
     elseif ($a -eq "-Resolve") { $resolveMode = $true }
     elseif ($a -eq "-Score")   { $scoreMode = $true }
     elseif ($a -eq "-v")       { $verboseMode = $true }
@@ -149,7 +140,7 @@ if ($verboseMode -and $scoreMode) { $javaArgs += "-v" }
 
 # For Score mode, always write structured output to output/
 if ($scoreMode) {
-    $outputPath = Join-Path $scriptDir "..\output"
+    $outputPath = Join-Path $projectDir "output"
     if (-not (Test-Path $outputPath)) { New-Item -ItemType Directory -Path $outputPath | Out-Null }
     $javaArgs += @("-o", (Resolve-Path $outputPath).Path)
 }
