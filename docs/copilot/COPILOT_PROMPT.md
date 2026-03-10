@@ -23,7 +23,7 @@ This system ingests U.S. Senate Judiciary Committee confirmation hearing transcr
    - **Precedent Sentiment Scoring** — (planned) When a legal precedent is referenced, score the speaker's stance toward that precedent.
    - **Rule-based scoring layer** — (planned) Pattern matching for hostile question types, supportive framing, and precedent stance signals.
 
-5. **SQL Database Storage** — MySQL 8.0 with `DatabaseManager` (reusable JDBC class) and `Hearing` entity (full CRUD). Schema in `sql/schema.sql`. Additional entity tables (speakers, nominees, turns, sentiment) planned. JSON remains the intermediate format for NLP output; database stores structured metadata.
+5. **SQL Database Storage** — MySQL 8.0 with `DatabaseManager` (reusable JDBC class) and `Hearing` entity (full CRUD). Current schema (`sql/schema.sql`) has only `hearings` table — a comprehensive 7-table schema has been designed and reviewed (see **Planned Database Schema** section below). JSON remains the intermediate output format; database will store all pipeline inputs, outputs, and scoring results.
 
 6. **Batch Processing** — (planned) Process hundreds of transcripts from a configurable input directory.
 
@@ -257,19 +257,240 @@ presenting a clear plan and getting explicit approval**. Each item needs scoping
 approach options, and my sign-off before any code is written.
 
 **Near-term (logical next steps):**
-1. **Apache POI `.docx` reading in Java** — Replace the PowerShell `Extract-TextFromDocx` function with native Java reading via Apache POI. Would eliminate the PowerShell-to-Java handoff for document extraction.
-2. **Speaker alias resolution** — Merge alternate titles for the same person (e.g., "Ranking Member Sessions" → "Senator Sessions", "The Chairman" → "Chairman Leahy"). Currently each unique title+lastName combo is treated as distinct.
-3. **Legal precedent detection** — Regex + dictionary approach to find case references (`"Roe v. Wade"`, `"554 U.S. 570"`, `"14th Amendment"`, `"stare decisis"`). Needs a `precedents.json` dictionary of ~200 landmark cases.
-4. **Rule-based scoring layer** — Pattern matching for hostile question types (`"Isn't it true that..."`, `"How can you justify..."`), supportive framing (`"Your impressive record..."`), and precedent stance signals (`"wrongly decided"`, `"settled law"`). Would supplement CoreNLP's tree-based sentiment.
-5. **Windowed precedent sentiment** — When a legal precedent is referenced, score the speaker's stance using a ±2-sentence window around the mention.
-6. **Additional CRUD entities** — Expand database layer with more entity classes (speakers, nominees, turns, sentiment scores, precedent references) following the same DatabaseManager + POJO CRUD pattern as Hearing.java.
+1. **Implement planned database schema** — Write full `schema.sql` (7 tables, see **Planned Database Schema** below) and build corresponding Java entity classes (Speaker, Nomination, Turn, ScoringRun, TurnScore) following the same `DatabaseManager` + POJO CRUD pattern as `Hearing.java`.
+2. **Pipeline-to-database integration** — Wire TurnScorer output directly into MySQL via DatabaseManager: parse → resolve → score → persist to `turns`, `turn_scores`, `scoring_runs`, etc. JSON remains as an additional output format.
+3. **Apache POI `.docx` reading in Java** — Replace the PowerShell `Extract-TextFromDocx` function with native Java reading via Apache POI. Would eliminate the PowerShell-to-Java handoff for document extraction.
+4. **Speaker alias resolution** — Merge alternate titles for the same person (e.g., "Ranking Member Sessions" → "Senator Sessions", "The Chairman" → "Chairman Leahy"). Currently each unique title+lastName combo is treated as distinct. Will populate `speakers.canonical_name` and potentially merge `speaker_id` FKs.
+5. **Legal precedent detection** — Regex + dictionary approach to find case references (`"Roe v. Wade"`, `"554 U.S. 570"`, `"14th Amendment"`, `"stare decisis"`). Needs a `precedents.json` dictionary of ~200 landmark cases. Future tables (`precedent_dict`, `precedent_refs`) would FK to `turns`.
+6. **Rule-based scoring layer** — Pattern matching for hostile question types (`"Isn't it true that..."`, `"How can you justify..."`), supportive framing (`"Your impressive record..."`), and precedent stance signals (`"wrongly decided"`, `"settled law"`). Would supplement CoreNLP's tree-based sentiment.
+7. **Windowed precedent sentiment** — When a legal precedent is referenced, score the speaker's stance using a ±2-sentence window around the mention.
 
 **Medium-term (infrastructure):**
-7. **Batch processing** — Process multiple transcripts from a configurable input directory. Idempotent re-processing, error recovery, progress tracking.
-8. **Pipeline-to-database integration** — Wire TurnScorer output directly into MySQL via DatabaseManager. Currently JSON is the intermediate format; the pipeline should also persist to SQL.
+8. **Batch processing** — Process multiple transcripts from a configurable input directory. Idempotent re-processing, error recovery, progress tracking. Each hearing gets a `hearings` row; cascade structure handles everything below it.
 
 **Long-term (visualization):**
-9. **Interactive viewer** — Front-end to browse results by hearing, nominee, senator, or precedent. Architecture undecided (web-based vs. local desktop app).
+9. **Interactive viewer** — Front-end to browse results by hearing, nominee, senator, or precedent. Architecture undecided (web-based vs. local desktop app). The `interactions_view` (computed from joins on `turn_scores` + `turns` + `nominations` + `speakers`) replaces the need to pre-aggregate data.
+
+---
+
+### Planned Database Schema (APPROVED DESIGN — not yet implemented in SQL)
+
+The current `schema.sql` only has the `hearings` table. The following 7-table + 1-view
+schema has been designed and reviewed. It stores all pipeline inputs (transcripts,
+speakers, hearing structure) and all outputs (turns, sentiment scores, scoring
+metadata). Interactions/aggregations are computed via SQL queries, not stored.
+
+**Design decisions made:**
+- Speakers table with FK linkage from the start (not deferred)
+- Interactions are computed via views/queries (not materialized tables)
+- Full turn text stored in `turns.text` (TEXT column) — essential for re-scoring,
+  precedent detection, rule-based scoring, full-text search, and the interactive viewer
+- All FKs use ON DELETE CASCADE — deleting a hearing removes all child records
+
+**Table relationships:**
+```
+speakers (canonical entities — reusable across all hearings)
+  ├── turns.speaker_id → FK
+  ├── nominations.speaker_id → FK
+  └── Shared across hearings; one row per unique person
+
+hearings (root entity — one per transcript)
+  ├── hearing_sections → hearing_id FK (CASCADE)
+  ├── turns → hearing_id FK (CASCADE)
+  └── scoring_runs → hearing_id FK (CASCADE)
+
+hearing_sections (panels within a hearing)
+  └── nominations → hearing_section_id FK (CASCADE)
+
+nominations (a person nominated for a position in a section)
+  └── turn_scores.target_nomination_id → FK
+
+scoring_runs (one per pipeline execution)
+  └── turn_scores.scoring_run_id → FK (CASCADE)
+```
+
+**Table definitions:**
+
+```sql
+-- 1. SPEAKERS — canonical person entities, reusable across hearings
+-- first_name is nullable for senators (pipeline only knows "Senator Sessions")
+-- canonical_name starts NULL, populated during speaker alias resolution phase
+speakers (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    first_name      VARCHAR(100)            -- nullable for senators
+    last_name       VARCHAR(100) NOT NULL,
+    canonical_name  VARCHAR(200)            -- e.g. "Jeff Sessions" — populated later
+    party           CHAR(1)                 -- D, R, I — nullable, enriched later
+    state           VARCHAR(50)             -- nullable, enriched later
+    role            ENUM('SENATOR','NOMINEE','PRESENTER','OTHER') NOT NULL,
+    INDEX idx_last_name (last_name)
+)
+
+-- 2. HEARINGS — root entity, one per transcript processed
+hearings (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    hearing_date    DATE,
+    session         VARCHAR(50),            -- e.g. "111th Congress, 1st Session"
+    serial_number   VARCHAR(100),           -- e.g. "S.Hrg. 111-695, Pt. 3"
+    committee       VARCHAR(255),           -- e.g. "Senate Judiciary Committee"
+    source_file     VARCHAR(500),           -- original filename
+    title           VARCHAR(1000),
+    UNIQUE KEY uq_source_file (source_file(255))
+)
+
+-- 3. HEARING_SECTIONS — panels within a hearing (detected from NOMINATIONS headers)
+hearing_sections (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    hearing_id      INT NOT NULL → FK hearings (CASCADE),
+    section_number  INT NOT NULL,           -- 1-based sequential
+    header_text     TEXT,                   -- full multi-line NOMINATIONS header
+    section_date    VARCHAR(50),            -- e.g. "JULY 29, 2009"
+    start_line      INT,                    -- 0-based line in source
+    end_line        INT,                    -- exclusive
+    UNIQUE KEY uq_hearing_section (hearing_id, section_number)
+)
+
+-- 4. NOMINATIONS — a person nominated for a position in a specific section
+-- Named "nominations" not "nominees" to distinguish the EVENT from the PERSON
+-- hearing_id is denormalized (could be derived via hearing_sections) for query convenience
+nominations (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    hearing_id          INT NOT NULL → FK hearings (CASCADE),
+    hearing_section_id  INT NOT NULL → FK hearing_sections (CASCADE),
+    speaker_id          INT NOT NULL → FK speakers,
+    position            VARCHAR(500),       -- e.g. "U.S. Circuit Judge for the Eleventh Circuit"
+    title_used          VARCHAR(20),        -- e.g. "Ms.", "Judge", "Mr."
+    UNIQUE KEY uq_section_speaker (hearing_section_id, speaker_id)
+)
+
+-- 5. TURNS — every speaker turn, full text stored
+-- speaker_label is the as-spoken label (e.g. "Chairman Leahy") preserved for display
+-- speaker_id links to canonical identity in speakers table
+turns (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    hearing_id          INT NOT NULL → FK hearings (CASCADE),
+    hearing_section_id  INT → FK hearing_sections (SET NULL),  -- nullable for pre-panel turns
+    speaker_id          INT NOT NULL → FK speakers,
+    turn_number         INT NOT NULL,       -- 1-based sequential within hearing
+    speaker_label       VARCHAR(200),       -- as-spoken: "Senator Sessions", "Chairman Leahy"
+    text                TEXT NOT NULL,       -- full speech text
+    start_line          INT,                -- 0-based line in source
+    char_count          INT,                -- length of text
+    is_substantive      BOOLEAN DEFAULT TRUE, -- false for [Off microphone.] etc.
+    UNIQUE KEY uq_hearing_turn (hearing_id, turn_number),
+    INDEX idx_speaker (speaker_id)
+)
+
+-- 6. SCORING_RUNS — one per pipeline execution, tracks model + timing
+scoring_runs (
+    id                      INT AUTO_INCREMENT PRIMARY KEY,
+    hearing_id              INT NOT NULL → FK hearings (CASCADE),
+    scored_at               DATETIME NOT NULL,
+    parser_model            VARCHAR(200),   -- e.g. "englishSR.beam.ser.gz"
+    total_turns             INT,
+    scored_turns            INT,
+    senator_turns           INT,
+    self_turns              INT,
+    skipped_turns           INT,
+    sentences_processed     INT,
+    unique_pairs            INT,
+    avg_confidence          DECIMAL(6,4),
+    scoring_time_seconds    DECIMAL(8,3)
+)
+
+-- 7. TURN_SCORES — per-turn sentiment scores, linked to a scoring run
+-- target_nomination_id is nullable (turns with UNKNOWN target have no nomination)
+-- Supports re-scoring: same turn can have scores from multiple scoring_runs
+turn_scores (
+    id                      INT AUTO_INCREMENT PRIMARY KEY,
+    turn_id                 INT NOT NULL → FK turns (CASCADE),
+    scoring_run_id          INT NOT NULL → FK scoring_runs (CASCADE),
+    target_nomination_id    INT → FK nominations,  -- nullable for UNKNOWN targets
+    resolution_method       ENUM('SELF','DIRECT_ADDRESS','RESPONSE_PAIR',
+                                 'PRIOR_CONTEXT','SECTION_DEFAULT','UNKNOWN') NOT NULL,
+    confidence              DECIMAL(4,3),   -- 0.000–1.000
+    sentence_count          INT,
+    total_score             INT,            -- sum of per-sentence [-2,+2] scores
+    avg_score               DECIMAL(6,4),   -- totalScore / sentenceCount
+    weighted_score          DECIMAL(6,4),   -- avgScore * confidence
+    UNIQUE KEY uq_turn_run (turn_id, scoring_run_id),
+    INDEX idx_scoring_run (scoring_run_id),
+    INDEX idx_target (target_nomination_id)
+)
+```
+
+**Computed view (replaces JSON interactions/nominees arrays):**
+```sql
+-- interactions_view — senator→nominee aggregations, computed not stored
+-- Replaces the pre-aggregated "interactions" and "nominees" arrays in JSON output
+-- GROUP BY scoring_run_id + speaker + nomination → turns, sentences, avg scores
+CREATE VIEW interactions_view AS
+SELECT
+    ts.scoring_run_id,
+    s_speaker.last_name   AS senator_last_name,
+    t.speaker_label       AS senator_label,
+    s_nominee.last_name   AS nominee_last_name,
+    CONCAT(n.title_used, ' ', s_nominee.last_name) AS nominee_label,
+    COUNT(*)              AS turns,
+    SUM(ts.sentence_count) AS sentences,
+    AVG(ts.weighted_score) AS avg_weighted_score,
+    AVG(ts.avg_score)      AS avg_raw_score,
+    SUM(ts.weighted_score) AS total_weighted
+FROM turn_scores ts
+JOIN turns t ON ts.turn_id = t.id
+JOIN speakers s_speaker ON t.speaker_id = s_speaker.id
+JOIN nominations n ON ts.target_nomination_id = n.id
+JOIN speakers s_nominee ON n.speaker_id = s_nominee.id
+WHERE ts.resolution_method != 'SELF'
+  AND ts.resolution_method != 'UNKNOWN'
+GROUP BY ts.scoring_run_id, t.speaker_id, n.id;
+```
+
+**Data available at each pipeline stage (what populates each table):**
+
+| Pipeline Stage | Tables Populated |
+|---|---|
+| Transcript import | `hearings` (metadata) |
+| `SpeakerTurnParser.parse()` | `speakers` (from turn labels), `turns` (full text) |
+| `TargetResolver.resolve()` | `hearing_sections`, `nominations`, `speakers` (nominees with first names) |
+| `TurnScorer.scoreTurn()` | `scoring_runs`, `turn_scores` |
+
+**Known data gaps at import time:**
+- **Senators have no first name** — pipeline only knows "Senator Sessions". `speakers.first_name` is nullable. `speakers.canonical_name` will be populated during future alias resolution phase.
+- **No party/state data** — not in transcripts. Will require external enrichment (congressional directory lookup or manual entry).
+- **SECTION_DEFAULT turns have UNKNOWN target** — 20 of 400 turns in the test hearing fall back to panel default with no specific nominee. `turn_scores.target_nomination_id` is nullable for these.
+- **Cross-hearing speaker dedup** — Two hearings both having "Senator Johnson" could be different people (Tim Johnson vs Ron Johnson). Deferred to alias resolution phase.
+
+**Example research queries this schema enables:**
+```sql
+-- All turns where Senator Sessions scored below -0.5 across all hearings
+SELECT h.serial_number, t.turn_number, t.text, ts.weighted_score
+FROM turn_scores ts
+JOIN turns t ON ts.turn_id = t.id
+JOIN speakers s ON t.speaker_id = s.id
+JOIN hearings h ON t.hearing_id = h.id
+WHERE s.last_name = 'Sessions' AND s.role = 'SENATOR'
+  AND ts.weighted_score < -0.5;
+
+-- Average nominee approval by resolution method
+SELECT ts.resolution_method, AVG(ts.weighted_score), COUNT(*)
+FROM turn_scores ts
+GROUP BY ts.resolution_method;
+
+-- Full-text search for legal precedent mentions
+SELECT t.speaker_label, t.text, ts.weighted_score
+FROM turns t
+JOIN turn_scores ts ON ts.turn_id = t.id
+WHERE t.text LIKE '%Roe v. Wade%';
+
+-- Compare scores between two different scoring runs
+SELECT t.turn_number, ts1.weighted_score AS run1, ts2.weighted_score AS run2
+FROM turns t
+JOIN turn_scores ts1 ON ts1.turn_id = t.id AND ts1.scoring_run_id = 1
+JOIN turn_scores ts2 ON ts2.turn_id = t.id AND ts2.scoring_run_id = 2;
+```
+
+---
 
 ### Key design principles:
 - **Pipeline pattern** — each processing stage is a separate class that can run independently
