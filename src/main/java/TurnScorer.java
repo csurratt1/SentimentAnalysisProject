@@ -448,6 +448,18 @@ public class TurnScorer {
     }
 
     /**
+     * Build a stable, file-system-safe label from the input transcript name.
+     * Example: hearing_text.txt -> hearing_text
+     */
+    private static String buildInputLabel(String inputPath) {
+        String fileName = Paths.get(inputPath).getFileName().toString();
+        int dot = fileName.lastIndexOf('.');
+        String base = dot > 0 ? fileName.substring(0, dot) : fileName;
+        String sanitized = base.replaceAll("[^A-Za-z0-9._-]", "_");
+        return sanitized.isBlank() ? "input" : sanitized;
+    }
+
+    /**
      * Writes the human-readable text report to a file.
      * Re-uses the same print methods that render to console.
      */
@@ -475,11 +487,14 @@ public class TurnScorer {
 
         // 1. Parse arguments
         boolean verbose = false;
+        boolean persistDb = true;
         String filePath = null;
         String outputDir = null;
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("-v") || args[i].equals("--verbose")) {
                 verbose = true;
+            } else if (args[i].equals("--no-db")) {
+                persistDb = false;
             } else if (args[i].equals("-o") && i + 1 < args.length) {
                 outputDir = args[++i];
             } else {
@@ -493,9 +508,10 @@ public class TurnScorer {
             text = new String(Files.readAllBytes(Paths.get(filePath)),
                               StandardCharsets.UTF_8);
         } else {
-            System.err.println("Usage: java TurnScorer [-v] [-o outputDir] <transcript.txt>");
+            System.err.println("Usage: java TurnScorer [-v] [-o outputDir] [--no-db] <transcript.txt>");
             System.err.println("  -v            Print per-turn detail");
             System.err.println("  -o <dir>      Write JSON + TXT reports to <dir>");
+            System.err.println("  --no-db       Disable MySQL persistence for this run");
             System.exit(1);
             return;
         }
@@ -524,6 +540,11 @@ public class TurnScorer {
         }
         System.out.printf("       %d self-turns, %d targeted, %d other%n",
             selfCount, specificCount, resolved.size() - selfCount - specificCount);
+        if (specificCount == 0) {
+            System.out.println("[WARN] No specific nominee targets were resolved.");
+            System.out.println("       Reports may contain little/no senator->nominee interaction data.");
+            System.out.println("       Use a transcript that includes NOMINATIONS headers or full hearing context.");
+        }
 
         // 5. Build CoreNLP pipeline (this is the slow step)
         System.out.println("[3/4] Loading CoreNLP models...");
@@ -584,28 +605,46 @@ public class TurnScorer {
 
             String timestamp = LocalDateTime.now().format(
                 DateTimeFormatter.ofPattern("yyyy-MM-dd_HHmmss"));
+            String inputLabel = buildInputLabel(filePath);
+            String scorePrefix = "score_" + inputLabel + "_" + timestamp;
 
-            Path jsonFile    = outDir.resolve("score_" + timestamp + ".json");
-            Path txtFile     = outDir.resolve("score_" + timestamp + ".txt");
-            Path jsonLatest  = outDir.resolve("score_latest.json");
-            Path txtLatest   = outDir.resolve("score_latest.txt");
+            Path jsonFile = outDir.resolve(scorePrefix + ".json");
+            Path txtFile  = outDir.resolve(scorePrefix + ".txt");
 
             writeJsonOutput(jsonFile, filePath, resolved, scored,
                             interactions, totalMs);
             writeTextReport(txtFile, verbose, resolved, scored,
                             interactions, totalMs);
 
-            // Copy to _latest for easy access
-            Files.copy(jsonFile, jsonLatest, StandardCopyOption.REPLACE_EXISTING);
-            Files.copy(txtFile,  txtLatest,  StandardCopyOption.REPLACE_EXISTING);
-
             System.out.println("=".repeat(70));
             System.out.println("  OUTPUT FILES");
             System.out.println("=".repeat(70));
             System.out.printf("  JSON: %s%n", jsonFile);
             System.out.printf("  TXT:  %s%n", txtFile);
-            System.out.printf("  (also copied to score_latest.json / .txt)%n");
+            System.out.printf("  Naming: score_<inputLabel>_<timestamp>.{json,txt}%n");
             System.out.println();
+        }
+
+        // 10. Persist to database
+        if (persistDb) {
+            try {
+                System.out.println("[DB] Persisting scoring run to MySQL...");
+                ScoringPersistence.persistRun(
+                    filePath,
+                    lines,
+                    resolved,
+                    scored,
+                    interactions,
+                    totalMs
+                );
+                System.out.println("[DB] Persistence complete.");
+                System.out.println();
+            } catch (Exception e) {
+                System.err.println("[DB] Persistence failed: " + e.getMessage());
+                if (verbose) {
+                    e.printStackTrace(System.err);
+                }
+            }
         }
     }
 }
