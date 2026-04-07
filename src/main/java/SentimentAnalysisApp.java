@@ -7,6 +7,7 @@ import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.*;
 
 /**
  * Simple desktop GUI for running the sentiment pipeline without terminal commands.
@@ -24,7 +25,12 @@ public class SentimentAnalysisApp {
     private JList<Path> inputList;
     private JList<Path> outputList;
     private JTextArea logArea;
-    private JButton runButton;
+    private JButton runSingleButton;
+    private JButton runBatchButton;
+    private JButton selectAllInputsButton;
+    private JButton clearSelectionButton;
+    private JSpinner batchWorkersSpinner;
+    private JLabel selectionSummaryValue;
     private JCheckBox dbPersistCheckBox;
     private JLabel dbStatusValue;
     private JLabel dbHearingValue;
@@ -32,6 +38,7 @@ public class SentimentAnalysisApp {
     private JLabel dbTurnsValue;
     private JLabel dbScoresValue;
     private JLabel dbReplaceValue;
+    private TurnScorer.RunResult lastBatchResult;
 
     public SentimentAnalysisApp() {
         this.projectRoot = resolveProjectRoot();
@@ -107,8 +114,13 @@ public class SentimentAnalysisApp {
         inputList = new JList<>(inputModel);
         outputList = new JList<>(outputModel);
 
-        inputList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        inputList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         outputList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        inputList.addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting()) {
+                updateSelectionSummary();
+            }
+        });
 
         inputList.setCellRenderer(new FileNameRenderer());
         outputList.setCellRenderer(new FileNameRenderer());
@@ -131,14 +143,24 @@ public class SentimentAnalysisApp {
         JButton addInputButton = new JButton("Add Input File");
         JButton removeInputButton = new JButton("Remove Input File");
         JButton removeOutputButton = new JButton("Remove Output File");
-        runButton = new JButton("Run Analysis");
+        runSingleButton = new JButton("Run Selected (Single)");
+        runBatchButton = new JButton("Run Selected (Batch)");
+        selectAllInputsButton = new JButton("Select All Inputs");
+        clearSelectionButton = new JButton("Clear Selection");
+        batchWorkersSpinner = new JSpinner(new SpinnerNumberModel(2, 1, 4, 1));
         dbPersistCheckBox = new JCheckBox("Persist To Database", true);
 
         refreshButton.addActionListener(e -> refreshLists());
         addInputButton.addActionListener(e -> addInputFile());
         removeInputButton.addActionListener(e -> removeSelectedFile(inputList, "input"));
         removeOutputButton.addActionListener(e -> removeSelectedFile(outputList, "output"));
-        runButton.addActionListener(e -> runSelectedAnalysis());
+        selectAllInputsButton.addActionListener(e -> selectAllInputs());
+        clearSelectionButton.addActionListener(e -> {
+            inputList.clearSelection();
+            updateSelectionSummary();
+        });
+        runSingleButton.addActionListener(e -> runSingleAnalysis());
+        runBatchButton.addActionListener(e -> runBatchAnalysis());
 
         panel.add(refreshButton);
         panel.add(Box.createVerticalStrut(8));
@@ -147,10 +169,20 @@ public class SentimentAnalysisApp {
         panel.add(removeInputButton);
         panel.add(Box.createVerticalStrut(8));
         panel.add(removeOutputButton);
-        panel.add(Box.createVerticalStrut(20));
+        panel.add(Box.createVerticalStrut(12));
+        panel.add(selectAllInputsButton);
+        panel.add(Box.createVerticalStrut(8));
+        panel.add(clearSelectionButton);
+        panel.add(Box.createVerticalStrut(14));
+        panel.add(new JLabel("Batch Workers (1-4):"));
+        panel.add(Box.createVerticalStrut(4));
+        panel.add(batchWorkersSpinner);
+        panel.add(Box.createVerticalStrut(12));
         panel.add(dbPersistCheckBox);
         panel.add(Box.createVerticalStrut(8));
-        panel.add(runButton);
+        panel.add(runSingleButton);
+        panel.add(Box.createVerticalStrut(8));
+        panel.add(runBatchButton);
         panel.add(Box.createVerticalGlue());
 
         return panel;
@@ -164,8 +196,23 @@ public class SentimentAnalysisApp {
     }
 
     private JPanel buildDbSummaryPanel() {
-        JPanel panel = new JPanel(new GridLayout(2, 6, 8, 4));
+        JPanel panel = new JPanel(new GridLayout(3, 6, 8, 4));
         panel.setBorder(BorderFactory.createTitledBorder("Last DB Run Summary"));
+
+        panel.add(new JLabel("Selected Input Files:"));
+        panel.add(new JLabel(""));
+        panel.add(new JLabel(""));
+        panel.add(new JLabel(""));
+        panel.add(new JLabel(""));
+        panel.add(new JLabel(""));
+
+        selectionSummaryValue = new JLabel("0 selected");
+        panel.add(selectionSummaryValue);
+        panel.add(new JLabel(""));
+        panel.add(new JLabel(""));
+        panel.add(new JLabel(""));
+        panel.add(new JLabel(""));
+        panel.add(new JLabel(""));
 
         panel.add(new JLabel("Status:"));
         panel.add(new JLabel("Hearing ID:"));
@@ -195,6 +242,7 @@ public class SentimentAnalysisApp {
         ensureDirectories();
         loadFiles(inputDir, inputModel);
         loadFiles(outputDir, outputModel);
+        updateSelectionSummary();
         appendLog("Refreshed file lists.");
     }
 
@@ -272,14 +320,43 @@ public class SentimentAnalysisApp {
         }
     }
 
-    private void runSelectedAnalysis() {
-        Path selectedInput = inputList.getSelectedValue();
-        if (selectedInput == null) {
-            appendLog("Select an input file before running analysis.");
+    private void selectAllInputs() {
+        if (inputModel.isEmpty()) {
+            appendLog("No input files available to select.");
+            return;
+        }
+        inputList.setSelectionInterval(0, inputModel.size() - 1);
+        updateSelectionSummary();
+    }
+
+    private void updateSelectionSummary() {
+        if (selectionSummaryValue == null || inputList == null) return;
+        int count = inputList.getSelectedValuesList().size();
+        selectionSummaryValue.setText(count + " selected");
+    }
+
+    private void setRunControlsEnabled(boolean enabled) {
+        runSingleButton.setEnabled(enabled);
+        runBatchButton.setEnabled(enabled);
+        dbPersistCheckBox.setEnabled(enabled);
+        batchWorkersSpinner.setEnabled(enabled);
+        addInputFileControlsEnabled(enabled);
+    }
+
+    private void addInputFileControlsEnabled(boolean enabled) {
+        selectAllInputsButton.setEnabled(enabled);
+        clearSelectionButton.setEnabled(enabled);
+    }
+
+    private void runSingleAnalysis() {
+        List<Path> selected = new ArrayList<>(new LinkedHashSet<>(inputList.getSelectedValuesList()));
+        if (selected.size() != 1) {
+            appendLog("Single run requires exactly one selected input file.");
             return;
         }
 
-        runButton.setEnabled(false);
+        Path selectedInput = selected.get(0);
+        setRunControlsEnabled(false);
         appendLog("Running analysis for: " + selectedInput.getFileName());
         boolean persistDb = dbPersistCheckBox.isSelected();
         appendLog("DB persistence: " + (persistDb ? "ON" : "OFF"));
@@ -316,12 +393,131 @@ public class SentimentAnalysisApp {
                     appendLog("Run failed: " + ex.getMessage());
                     clearDbSummary("Run failed");
                 } finally {
-                    runButton.setEnabled(true);
+                    setRunControlsEnabled(true);
                 }
             }
         };
 
         worker.execute();
+    }
+
+    private void runBatchAnalysis() {
+        List<Path> selected = new ArrayList<>(new LinkedHashSet<>(inputList.getSelectedValuesList()));
+        if (selected.isEmpty()) {
+            appendLog("Select one or more input files for batch run.");
+            return;
+        }
+
+        final int workers = Math.min((Integer) batchWorkersSpinner.getValue(), selected.size());
+        final boolean persistDb = dbPersistCheckBox.isSelected();
+
+        int confirm = JOptionPane.showConfirmDialog(
+            appFrame,
+            buildBatchConfirmationMessage(selected, workers, persistDb),
+            "Confirm Batch Analysis",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.INFORMATION_MESSAGE
+        );
+        if (confirm != JOptionPane.OK_OPTION) {
+            appendLog("Batch run cancelled by user.");
+            return;
+        }
+
+        setRunControlsEnabled(false);
+        clearDbSummary("Batch running");
+        appendLog("Starting batch run for " + selected.size() + " files with " + workers + " worker(s).");
+        appendLog("DB persistence: " + (persistDb ? "ON" : "OFF"));
+
+        SwingWorker<Void, String> worker = new SwingWorker<>() {
+            @Override
+            protected Void doInBackground() {
+                ExecutorService executor = Executors.newFixedThreadPool(workers);
+                CompletionService<RunOutcome> completion = new ExecutorCompletionService<>(executor);
+
+                try {
+                    for (Path input : selected) {
+                        completion.submit(() -> {
+                            try {
+                                TurnScorer.RunResult result = TurnScorer.runPipeline(
+                                    input.toString(),
+                                    outputDir.toString(),
+                                    false,
+                                    persistDb
+                                );
+                                return RunOutcome.success(input, result);
+                            } catch (Exception ex) {
+                                return RunOutcome.failure(input, ex);
+                            }
+                        });
+                    }
+
+                    for (int i = 0; i < selected.size(); i++) {
+                        Future<RunOutcome> future = completion.take();
+                        RunOutcome outcome = future.get();
+                        if (outcome.error != null) {
+                            publish("Batch failed for " + outcome.input.getFileName() + ": " + outcome.error.getMessage());
+                        } else {
+                            lastBatchResult = outcome.result;
+                            publish("Batch complete for " + outcome.input.getFileName()
+                                + " | scored=" + outcome.result.getScoredTurns()
+                                + " | DB=" + outcome.result.getDbMessage());
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    publish("Batch run interrupted.");
+                } catch (ExecutionException e) {
+                    publish("Batch run error: " + e.getMessage());
+                } finally {
+                    executor.shutdownNow();
+                }
+
+                return null;
+            }
+
+            @Override
+            protected void process(List<String> chunks) {
+                for (String msg : chunks) {
+                    appendLog(msg);
+                }
+            }
+
+            @Override
+            protected void done() {
+                setRunControlsEnabled(true);
+                refreshLists();
+                if (lastBatchResult != null) {
+                    updateDbSummary(lastBatchResult);
+                } else {
+                    clearDbSummary("Batch finished");
+                }
+                appendLog("Batch run finished.");
+            }
+        };
+
+        worker.execute();
+    }
+
+    private String buildBatchConfirmationMessage(List<Path> selected,
+                                                 int workers,
+                                                 boolean persistDb) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("You are about to run batch analysis.\n\n");
+        sb.append("Files selected: ").append(selected.size()).append("\n");
+        sb.append("Workers: ").append(workers).append("\n");
+        sb.append("DB persistence: ").append(persistDb ? "ON" : "OFF").append("\n\n");
+        sb.append("First files:\n");
+
+        int previewCount = Math.min(5, selected.size());
+        for (int i = 0; i < previewCount; i++) {
+            sb.append(" - ").append(selected.get(i).getFileName()).append("\n");
+        }
+        if (selected.size() > previewCount) {
+            sb.append(" - ... and ").append(selected.size() - previewCount).append(" more\n");
+        }
+
+        sb.append("\nProceed?");
+        return sb.toString();
     }
 
     private void appendLog(String message) {
@@ -368,6 +564,26 @@ public class SentimentAnalysisApp {
                 label.setText(((Path) value).getFileName().toString());
             }
             return label;
+        }
+    }
+
+    private static class RunOutcome {
+        private final Path input;
+        private final TurnScorer.RunResult result;
+        private final Exception error;
+
+        private RunOutcome(Path input, TurnScorer.RunResult result, Exception error) {
+            this.input = input;
+            this.result = result;
+            this.error = error;
+        }
+
+        static RunOutcome success(Path input, TurnScorer.RunResult result) {
+            return new RunOutcome(input, result, null);
+        }
+
+        static RunOutcome failure(Path input, Exception error) {
+            return new RunOutcome(input, null, error);
         }
     }
 }
