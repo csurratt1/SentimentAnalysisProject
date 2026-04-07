@@ -37,6 +37,47 @@ import java.util.*;
  */
 public class TurnScorer {
 
+    /**
+     * Result object returned by non-CLI pipeline execution.
+     */
+    public static class RunResult {
+        private final Path jsonFile;
+        private final Path textFile;
+        private final int totalTurns;
+        private final int scoredTurns;
+        private final int interactionPairs;
+        private final boolean dbPersisted;
+        private final String dbMessage;
+        private final ScoringPersistence.PersistenceResult dbSummary;
+
+        public RunResult(Path jsonFile,
+                         Path textFile,
+                         int totalTurns,
+                         int scoredTurns,
+                         int interactionPairs,
+                         boolean dbPersisted,
+                         String dbMessage,
+                         ScoringPersistence.PersistenceResult dbSummary) {
+            this.jsonFile = jsonFile;
+            this.textFile = textFile;
+            this.totalTurns = totalTurns;
+            this.scoredTurns = scoredTurns;
+            this.interactionPairs = interactionPairs;
+            this.dbPersisted = dbPersisted;
+            this.dbMessage = dbMessage;
+            this.dbSummary = dbSummary;
+        }
+
+        public Path getJsonFile() { return jsonFile; }
+        public Path getTextFile() { return textFile; }
+        public int getTotalTurns() { return totalTurns; }
+        public int getScoredTurns() { return scoredTurns; }
+        public int getInteractionPairs() { return interactionPairs; }
+        public boolean isDbPersisted() { return dbPersisted; }
+        public String getDbMessage() { return dbMessage; }
+        public ScoringPersistence.PersistenceResult getDbSummary() { return dbSummary; }
+    }
+
     // ── Sentiment labels and mapping ─────────────────────────────────────
 
     private static final String[] LABELS = {
@@ -483,38 +524,18 @@ public class TurnScorer {
 
     // ── Main: standalone runner ──────────────────────────────────────────
 
-    public static void main(String[] args) throws IOException {
+    public static RunResult runPipeline(String filePath,
+                                         String outputDir,
+                                         boolean verbose,
+                                         boolean persistDb) throws IOException {
 
-        // 1. Parse arguments
-        boolean verbose = false;
-        boolean persistDb = true;
-        String filePath = null;
-        String outputDir = null;
-        for (int i = 0; i < args.length; i++) {
-            if (args[i].equals("-v") || args[i].equals("--verbose")) {
-                verbose = true;
-            } else if (args[i].equals("--no-db")) {
-                persistDb = false;
-            } else if (args[i].equals("-o") && i + 1 < args.length) {
-                outputDir = args[++i];
-            } else {
-                filePath = args[i];
-            }
+        if (filePath == null || filePath.isBlank()) {
+            throw new IllegalArgumentException("Input transcript file is required.");
         }
 
-        // 2. Read input text
-        String text;
-        if (filePath != null) {
-            text = new String(Files.readAllBytes(Paths.get(filePath)),
-                              StandardCharsets.UTF_8);
-        } else {
-            System.err.println("Usage: java TurnScorer [-v] [-o outputDir] [--no-db] <transcript.txt>");
-            System.err.println("  -v            Print per-turn detail");
-            System.err.println("  -o <dir>      Write JSON + TXT reports to <dir>");
-            System.err.println("  --no-db       Disable MySQL persistence for this run");
-            System.exit(1);
-            return;
-        }
+        // 1. Read input text
+        String text = new String(Files.readAllBytes(Paths.get(filePath)),
+                                 StandardCharsets.UTF_8);
 
         System.out.println();
         System.out.println("=".repeat(70));
@@ -598,7 +619,10 @@ public class TurnScorer {
         printSenatorProfile(System.out, interactions);
         printSummary(System.out, resolved, scored, interactions, totalMs);
 
-        // 9. Write output files if -o was specified
+        Path jsonFile = null;
+        Path txtFile = null;
+
+        // 9. Write output files if output directory was specified
         if (outputDir != null) {
             Path outDir = Paths.get(outputDir);
             Files.createDirectories(outDir);
@@ -608,8 +632,8 @@ public class TurnScorer {
             String inputLabel = buildInputLabel(filePath);
             String scorePrefix = "score_" + inputLabel + "_" + timestamp;
 
-            Path jsonFile = outDir.resolve(scorePrefix + ".json");
-            Path txtFile  = outDir.resolve(scorePrefix + ".txt");
+            jsonFile = outDir.resolve(scorePrefix + ".json");
+            txtFile  = outDir.resolve(scorePrefix + ".txt");
 
             writeJsonOutput(jsonFile, filePath, resolved, scored,
                             interactions, totalMs);
@@ -626,10 +650,13 @@ public class TurnScorer {
         }
 
         // 10. Persist to database
+        boolean dbPersisted = false;
+        String dbMessage = "DB persistence disabled for this run.";
+        ScoringPersistence.PersistenceResult dbSummary = null;
         if (persistDb) {
             try {
                 System.out.println("[DB] Persisting scoring run to MySQL...");
-                ScoringPersistence.persistRun(
+                dbSummary = ScoringPersistence.persistRun(
                     filePath,
                     lines,
                     resolved,
@@ -639,12 +666,63 @@ public class TurnScorer {
                 );
                 System.out.println("[DB] Persistence complete.");
                 System.out.println();
+                dbPersisted = true;
+                dbMessage = "Persistence complete (hearing="
+                    + dbSummary.getHearingId()
+                    + ", run="
+                    + dbSummary.getScoringRunId()
+                    + ").";
             } catch (Exception e) {
                 System.err.println("[DB] Persistence failed: " + e.getMessage());
                 if (verbose) {
                     e.printStackTrace(System.err);
                 }
+                dbMessage = "Persistence failed: " + e.getMessage();
+            }
+        } else {
+            dbMessage = "DB persistence skipped (--no-db).";
+        }
+
+        return new RunResult(
+            jsonFile,
+            txtFile,
+            resolved.size(),
+            scored.size(),
+            interactions.size(),
+            dbPersisted,
+            dbMessage,
+            dbSummary
+        );
+    }
+
+    public static void main(String[] args) throws IOException {
+
+        // Parse CLI arguments and delegate to reusable runner.
+        boolean verbose = false;
+        boolean persistDb = true;
+        String filePath = null;
+        String outputDir = null;
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].equals("-v") || args[i].equals("--verbose")) {
+                verbose = true;
+            } else if (args[i].equals("--no-db")) {
+                persistDb = false;
+            } else if (args[i].equals("-o") && i + 1 < args.length) {
+                outputDir = args[++i];
+            } else {
+                filePath = args[i];
             }
         }
+
+        if (filePath == null) {
+            System.err.println("Usage: java TurnScorer [-v] [-o outputDir] [--no-db] <transcript.txt>");
+            System.err.println("  -v            Print per-turn detail");
+            System.err.println("  -o <dir>      Write JSON + TXT reports to <dir>");
+            System.err.println("  --no-db       Disable MySQL persistence for this run");
+            System.exit(1);
+            return;
+        }
+
+        runPipeline(filePath, outputDir, verbose, persistDb);
     }
 }

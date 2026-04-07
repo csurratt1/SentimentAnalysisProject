@@ -13,6 +13,32 @@ import java.util.*;
  */
 public class ScoringPersistence {
 
+    public static class PersistenceResult {
+        private final int hearingId;
+        private final int scoringRunId;
+        private final int turnsInserted;
+        private final int turnScoresInserted;
+        private final boolean replacedExistingRun;
+
+        public PersistenceResult(int hearingId,
+                                 int scoringRunId,
+                                 int turnsInserted,
+                                 int turnScoresInserted,
+                                 boolean replacedExistingRun) {
+            this.hearingId = hearingId;
+            this.scoringRunId = scoringRunId;
+            this.turnsInserted = turnsInserted;
+            this.turnScoresInserted = turnScoresInserted;
+            this.replacedExistingRun = replacedExistingRun;
+        }
+
+        public int getHearingId() { return hearingId; }
+        public int getScoringRunId() { return scoringRunId; }
+        public int getTurnsInserted() { return turnsInserted; }
+        public int getTurnScoresInserted() { return turnScoresInserted; }
+        public boolean isReplacedExistingRun() { return replacedExistingRun; }
+    }
+
     private static final Set<String> SENATOR_TITLES = Set.of(
         "Chairman", "The Chairman", "Senator"
     );
@@ -27,12 +53,12 @@ public class ScoringPersistence {
     private static final DateTimeFormatter SCORED_AT_FORMAT =
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    public static void persistRun(String inputFile,
-                                  List<String> lines,
-                                  List<ResolvedTarget> resolved,
-                                  List<ScoredTurn> scored,
-                                  Map<String, TurnScorer.InteractionScore> interactions,
-                                  long totalMs) throws SQLException {
+    public static PersistenceResult persistRun(String inputFile,
+                                               List<String> lines,
+                                               List<ResolvedTarget> resolved,
+                                               List<ScoredTurn> scored,
+                                               Map<String, TurnScorer.InteractionScore> interactions,
+                                               long totalMs) throws SQLException {
 
         DatabaseManager db = new DatabaseManager();
         Connection conn = null;
@@ -52,7 +78,13 @@ public class ScoringPersistence {
             Integer existingHearingId = findHearingIdBySourceFile(db, sourceFile);
             int hearingId = upsertHearing(db, sourceFile, sections, existingHearingId);
 
+            boolean replacedExistingRun = false;
             if (existingHearingId != null) {
+                if (hasExistingScoringRun(db, existingHearingId)) {
+                    replacedExistingRun = true;
+                    System.out.printf("[DB] Existing run found for source_file='%s'. Replacing prior data to keep exactly one run per file.%n",
+                        sourceFile);
+                }
                 clearHearingChildren(db, hearingId);
             }
 
@@ -68,11 +100,19 @@ public class ScoringPersistence {
             );
 
             int scoringRunId = insertScoringRun(db, hearingId, resolved, scored, interactions, totalMs);
-            insertTurnScores(db, scoringRunId, scored, turnIds, sections, nominationIds);
+            int turnScoresInserted = insertTurnScores(db, scoringRunId, scored, turnIds, sections, nominationIds);
 
             conn.commit();
             System.out.printf("[DB] Persisted hearing=%d run=%d turns=%d scored=%d%n",
                 hearingId, scoringRunId, resolved.size(), scored.size());
+
+            return new PersistenceResult(
+                hearingId,
+                scoringRunId,
+                turnIds.size(),
+                turnScoresInserted,
+                replacedExistingRun
+            );
 
         } catch (SQLException e) {
             if (conn != null) {
@@ -142,6 +182,14 @@ public class ScoringPersistence {
         db.execute("DELETE FROM turns WHERE hearing_id = ?", Map.of(1, hearingId));
         db.execute("DELETE FROM nominations WHERE hearing_id = ?", Map.of(1, hearingId));
         db.execute("DELETE FROM hearing_sections WHERE hearing_id = ?", Map.of(1, hearingId));
+    }
+
+    private static boolean hasExistingScoringRun(DatabaseManager db, int hearingId) throws SQLException {
+        String sql = "SELECT COUNT(*) AS cnt FROM scoring_runs WHERE hearing_id = ?";
+        List<Map<String, Object>> rows = db.executeQuery(sql, Map.of(1, hearingId));
+        if (rows.isEmpty()) return false;
+        Number count = (Number) rows.get(0).get("cnt");
+        return count != null && count.intValue() > 0;
     }
 
     private static Map<String, NomineeInfo> collectNomineesByLastName(
@@ -350,13 +398,14 @@ public class ScoringPersistence {
         return run.getId();
     }
 
-    private static void insertTurnScores(DatabaseManager db,
-                                         int scoringRunId,
-                                         List<ScoredTurn> scored,
-                                         Map<Integer, Integer> turnIds,
-                                         List<HearingSection> sections,
-                                         Map<String, Integer> nominationIds)
+    private static int insertTurnScores(DatabaseManager db,
+                                        int scoringRunId,
+                                        List<ScoredTurn> scored,
+                                        Map<Integer, Integer> turnIds,
+                                        List<HearingSection> sections,
+                                        Map<String, Integer> nominationIds)
             throws SQLException {
+        int inserted = 0;
         for (ScoredTurn st : scored) {
             ResolvedTarget rt = st.getTarget();
             SpeakerTurn turn = rt.getTurn();
@@ -388,7 +437,9 @@ public class ScoringPersistence {
                 st.getWeightedScore()
             );
             row.save(db);
+            inserted++;
         }
+        return inserted;
     }
 
     private static HearingSection findSection(int lineNumber, List<HearingSection> sections) {
