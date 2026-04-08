@@ -14,6 +14,8 @@ import java.util.concurrent.*;
  */
 public class SentimentAnalysisApp {
 
+    private static final int MAX_SAFE_BATCH_WORKERS = 2;
+
     private final Path projectRoot;
     private final Path inputDir;
     private final Path outputDir;
@@ -32,6 +34,7 @@ public class SentimentAnalysisApp {
     private JSpinner batchWorkersSpinner;
     private JLabel selectionSummaryValue;
     private JCheckBox dbPersistCheckBox;
+    private JCheckBox previewBeforeCommitCheckBox;
     private JLabel dbStatusValue;
     private JLabel dbHearingValue;
     private JLabel dbRunValue;
@@ -149,6 +152,7 @@ public class SentimentAnalysisApp {
         clearSelectionButton = new JButton("Clear Selection");
         batchWorkersSpinner = new JSpinner(new SpinnerNumberModel(2, 1, 4, 1));
         dbPersistCheckBox = new JCheckBox("Persist To Database", true);
+        previewBeforeCommitCheckBox = new JCheckBox("Preview Before Save (Single)", true);
 
         refreshButton.addActionListener(e -> refreshLists());
         addInputButton.addActionListener(e -> addInputFile());
@@ -178,6 +182,8 @@ public class SentimentAnalysisApp {
         panel.add(Box.createVerticalStrut(4));
         panel.add(batchWorkersSpinner);
         panel.add(Box.createVerticalStrut(12));
+        panel.add(previewBeforeCommitCheckBox);
+        panel.add(Box.createVerticalStrut(8));
         panel.add(dbPersistCheckBox);
         panel.add(Box.createVerticalStrut(8));
         panel.add(runSingleButton);
@@ -273,9 +279,9 @@ public class SentimentAnalysisApp {
     }
 
     private void addInputFile() {
-        FileDialog dialog = new FileDialog(appFrame, "Select Input Text File", FileDialog.LOAD);
+        FileDialog dialog = new FileDialog(appFrame, "Select Input Transcript (.txt or .docx)", FileDialog.LOAD);
         dialog.setDirectory(inputDir.toString());
-        dialog.setFile("*.txt");
+        dialog.setFile("*.txt;*.docx");
         dialog.setVisible(true);
 
         if (dialog.getFile() == null) {
@@ -284,6 +290,12 @@ public class SentimentAnalysisApp {
 
         Path source = Paths.get(dialog.getDirectory(), dialog.getFile());
         Path target = inputDir.resolve(source.getFileName().toString());
+
+        String lower = source.getFileName().toString().toLowerCase();
+        if (!(lower.endsWith(".txt") || lower.endsWith(".docx"))) {
+            appendLog("Unsupported file type: " + source.getFileName() + " (use .txt or .docx)");
+            return;
+        }
 
         try {
             Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
@@ -339,6 +351,7 @@ public class SentimentAnalysisApp {
         runSingleButton.setEnabled(enabled);
         runBatchButton.setEnabled(enabled);
         dbPersistCheckBox.setEnabled(enabled);
+        previewBeforeCommitCheckBox.setEnabled(enabled);
         batchWorkersSpinner.setEnabled(enabled);
         addInputFileControlsEnabled(enabled);
     }
@@ -357,15 +370,59 @@ public class SentimentAnalysisApp {
 
         Path selectedInput = selected.get(0);
         setRunControlsEnabled(false);
-        appendLog("Running analysis for: " + selectedInput.getFileName());
+        appendLog("Analyzing: " + selectedInput.getFileName());
         boolean persistDb = dbPersistCheckBox.isSelected();
+        boolean previewBeforeCommit = previewBeforeCommitCheckBox.isSelected();
         appendLog("DB persistence: " + (persistDb ? "ON" : "OFF"));
+        appendLog("Preview before save: " + (previewBeforeCommit ? "ON" : "OFF"));
 
-        SwingWorker<TurnScorer.RunResult, Void> worker = new SwingWorker<>() {
+        SwingWorker<TurnScorer.AnalysisBundle, Void> worker = new SwingWorker<>() {
+            @Override
+            protected TurnScorer.AnalysisBundle doInBackground() throws Exception {
+                return TurnScorer.analyzeOnly(
+                    selectedInput.toString(),
+                    false,
+                    false
+                );
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    TurnScorer.AnalysisBundle analysis = get();
+                    appendLog("Analysis complete. Turns scored: " + analysis.getScored().size());
+
+                    if (previewBeforeCommit) {
+                        String textPreview = TurnScorer.buildTextPreview(analysis, false);
+                        String jsonPreview = TurnScorer.buildJsonPreview(analysis);
+                        boolean confirmed = showPreviewAndConfirm(textPreview, jsonPreview);
+                        if (!confirmed) {
+                            appendLog("Run discarded after preview. No output files or DB changes were made.");
+                            clearDbSummary("Discarded after preview");
+                            setRunControlsEnabled(true);
+                            return;
+                        }
+                    }
+
+                    appendLog("Committing output and database changes...");
+                    commitAnalysisResult(analysis, persistDb);
+                } catch (Exception ex) {
+                    appendLog("Run failed: " + ex.getMessage());
+                    clearDbSummary("Run failed");
+                    setRunControlsEnabled(true);
+                }
+            }
+        };
+
+        worker.execute();
+    }
+
+    private void commitAnalysisResult(TurnScorer.AnalysisBundle analysis, boolean persistDb) {
+        SwingWorker<TurnScorer.RunResult, Void> commitWorker = new SwingWorker<>() {
             @Override
             protected TurnScorer.RunResult doInBackground() throws Exception {
-                return TurnScorer.runPipeline(
-                    selectedInput.toString(),
+                return TurnScorer.finalizeRun(
+                    analysis,
                     outputDir.toString(),
                     false,
                     persistDb
@@ -390,15 +447,39 @@ public class SentimentAnalysisApp {
                     updateDbSummary(result);
                     refreshLists();
                 } catch (Exception ex) {
-                    appendLog("Run failed: " + ex.getMessage());
-                    clearDbSummary("Run failed");
+                    appendLog("Commit failed: " + ex.getMessage());
+                    clearDbSummary("Commit failed");
                 } finally {
                     setRunControlsEnabled(true);
                 }
             }
         };
 
-        worker.execute();
+        commitWorker.execute();
+    }
+
+    private boolean showPreviewAndConfirm(String textPreview, String jsonPreview) {
+        JTabbedPane tabs = new JTabbedPane();
+
+        JTextArea textArea = new JTextArea(textPreview, 28, 100);
+        textArea.setEditable(false);
+        textArea.setCaretPosition(0);
+
+        JTextArea jsonArea = new JTextArea(jsonPreview, 28, 100);
+        jsonArea.setEditable(false);
+        jsonArea.setCaretPosition(0);
+
+        tabs.addTab("Text Report Preview", new JScrollPane(textArea));
+        tabs.addTab("JSON Preview", new JScrollPane(jsonArea));
+
+        int decision = JOptionPane.showConfirmDialog(
+            appFrame,
+            tabs,
+            "Preview Results - Confirm Save",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.PLAIN_MESSAGE
+        );
+        return decision == JOptionPane.OK_OPTION;
     }
 
     private void runBatchAnalysis() {
@@ -408,12 +489,20 @@ public class SentimentAnalysisApp {
             return;
         }
 
-        final int workers = Math.min((Integer) batchWorkersSpinner.getValue(), selected.size());
+        lastBatchResult = null;
+
+        final int requestedWorkers = Math.min((Integer) batchWorkersSpinner.getValue(), selected.size());
+        final int workers = Math.min(requestedWorkers, MAX_SAFE_BATCH_WORKERS);
         final boolean persistDb = dbPersistCheckBox.isSelected();
+
+        if (workers < requestedWorkers) {
+            appendLog("Batch workers limited to " + workers
+                + " for CoreNLP stability (requested " + requestedWorkers + ").");
+        }
 
         int confirm = JOptionPane.showConfirmDialog(
             appFrame,
-            buildBatchConfirmationMessage(selected, workers, persistDb),
+            buildBatchConfirmationMessage(selected, requestedWorkers, workers, persistDb),
             "Confirm Batch Analysis",
             JOptionPane.OK_CANCEL_OPTION,
             JOptionPane.INFORMATION_MESSAGE
@@ -499,12 +588,14 @@ public class SentimentAnalysisApp {
     }
 
     private String buildBatchConfirmationMessage(List<Path> selected,
-                                                 int workers,
+                                                 int requestedWorkers,
+                                                 int effectiveWorkers,
                                                  boolean persistDb) {
         StringBuilder sb = new StringBuilder();
         sb.append("You are about to run batch analysis.\n\n");
         sb.append("Files selected: ").append(selected.size()).append("\n");
-        sb.append("Workers: ").append(workers).append("\n");
+        sb.append("Workers requested: ").append(requestedWorkers).append("\n");
+        sb.append("Workers used: ").append(effectiveWorkers).append("\n");
         sb.append("DB persistence: ").append(persistDb ? "ON" : "OFF").append("\n\n");
         sb.append("First files:\n");
 

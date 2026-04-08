@@ -88,15 +88,15 @@ public class ScoringPersistence {
                 clearHearingChildren(db, hearingId);
             }
 
-            Map<String, NomineeInfo> nomineeByLastName = collectNomineesByLastName(resolved, sections);
+            Map<String, NomineeInfo> nomineeByKey = collectNomineesByKey(resolved, sections);
             Map<Integer, Map<String, NomineeInfo>> sectionNominees = collectNomineesBySection(resolved, sections);
 
             Map<Integer, Integer> sectionDbIds = insertSections(db, hearingId, sections);
             Map<String, Integer> nominationIds = insertNominations(
-                db, hearingId, sections, sectionNominees, nomineeByLastName, sectionDbIds
+                db, hearingId, sections, sectionNominees, nomineeByKey, sectionDbIds
             );
             Map<Integer, Integer> turnIds = insertTurns(
-                db, hearingId, resolved, sections, sectionDbIds, nomineeByLastName
+                db, hearingId, resolved, sections, sectionDbIds, nomineeByKey, sectionNominees
             );
 
             int scoringRunId = insertScoringRun(db, hearingId, resolved, scored, interactions, totalMs);
@@ -192,24 +192,24 @@ public class ScoringPersistence {
         return count != null && count.intValue() > 0;
     }
 
-    private static Map<String, NomineeInfo> collectNomineesByLastName(
+    private static Map<String, NomineeInfo> collectNomineesByKey(
             List<ResolvedTarget> resolved,
             List<HearingSection> sections) {
         Map<String, NomineeInfo> nominees = new LinkedHashMap<>();
 
         for (HearingSection section : sections) {
             for (NomineeInfo nominee : section.getNominees()) {
-                nominees.put(nominee.getLastName().toLowerCase(), nominee);
+                nominees.put(nomineeKey(nominee), nominee);
             }
         }
 
         for (ResolvedTarget rt : resolved) {
             if (rt.getNominee() != null) {
                 NomineeInfo nominee = rt.getNominee();
-                nominees.put(nominee.getLastName().toLowerCase(), nominee);
+                nominees.put(nomineeKey(nominee), nominee);
             }
             for (NomineeInfo nominee : rt.getPanelNominees()) {
-                nominees.put(nominee.getLastName().toLowerCase(), nominee);
+                nominees.put(nomineeKey(nominee), nominee);
             }
         }
 
@@ -226,7 +226,7 @@ public class ScoringPersistence {
                 section.getSectionNumber(), k -> new LinkedHashMap<>()
             );
             for (NomineeInfo nominee : section.getNominees()) {
-                bucket.put(nominee.getLastName().toLowerCase(), nominee);
+                bucket.put(nomineeKey(nominee), nominee);
             }
         }
 
@@ -239,11 +239,11 @@ public class ScoringPersistence {
             );
 
             for (NomineeInfo nominee : rt.getPanelNominees()) {
-                bucket.put(nominee.getLastName().toLowerCase(), nominee);
+                bucket.put(nomineeKey(nominee), nominee);
             }
             if (rt.getNominee() != null) {
                 NomineeInfo nominee = rt.getNominee();
-                bucket.put(nominee.getLastName().toLowerCase(), nominee);
+                bucket.put(nomineeKey(nominee), nominee);
             }
         }
 
@@ -280,7 +280,7 @@ public class ScoringPersistence {
                                                           int hearingId,
                                                           List<HearingSection> sections,
                                                           Map<Integer, Map<String, NomineeInfo>> sectionNominees,
-                                                          Map<String, NomineeInfo> nomineeByLastName,
+                                                          Map<String, NomineeInfo> nomineeByKey,
                                                           Map<Integer, Integer> sectionDbIds)
             throws SQLException {
         Map<String, Integer> nominationIds = new LinkedHashMap<>();
@@ -310,11 +310,12 @@ public class ScoringPersistence {
                 );
                 row.save(db);
 
-                String bySectionKey = section.getSectionNumber() + "|" + nominee.getLastName().toLowerCase();
+                String nomKey = nomineeKey(nominee);
+                String bySectionKey = section.getSectionNumber() + "|" + nomKey;
                 nominationIds.put(bySectionKey, row.getId());
-                nominationIds.putIfAbsent("LAST|" + nominee.getLastName().toLowerCase(), row.getId());
+                nominationIds.putIfAbsent("NOM|" + nomKey, row.getId());
 
-                nomineeByLastName.put(nominee.getLastName().toLowerCase(), nominee);
+                nomineeByKey.put(nomKey, nominee);
             }
         }
 
@@ -326,7 +327,8 @@ public class ScoringPersistence {
                                                      List<ResolvedTarget> resolved,
                                                      List<HearingSection> sections,
                                                      Map<Integer, Integer> sectionDbIds,
-                                                     Map<String, NomineeInfo> nomineeByLastName)
+                                                     Map<String, NomineeInfo> nomineeByKey,
+                                                     Map<Integer, Map<String, NomineeInfo>> sectionNominees)
             throws SQLException {
         Map<Integer, Integer> turnIds = new LinkedHashMap<>();
 
@@ -335,8 +337,13 @@ public class ScoringPersistence {
             HearingSection section = findSection(turn.getStartLine(), sections);
             Integer sectionId = section != null ? sectionDbIds.get(section.getSectionNumber()) : null;
 
-            String role = inferRole(turn, nomineeByLastName);
-            NomineeInfo nomineeSpeaker = nomineeByLastName.get(turn.getLastName().toLowerCase());
+            NomineeInfo nomineeSpeaker = findNomineeSpeakerForTurn(
+                turn,
+                section,
+                sectionNominees,
+                nomineeByKey
+            );
+            String role = inferRole(turn, nomineeSpeaker);
             String firstName = ("NOMINEE".equals(role) && nomineeSpeaker != null)
                 ? nomineeSpeaker.getFirstName()
                 : null;
@@ -415,13 +422,13 @@ public class ScoringPersistence {
 
             Integer targetNominationId = null;
             if (rt.getNominee() != null) {
-                String last = rt.getNominee().getLastName().toLowerCase();
+                String nomineeKey = nomineeKey(rt.getNominee());
                 HearingSection section = findSection(turn.getStartLine(), sections);
                 if (section != null) {
-                    targetNominationId = nominationIds.get(section.getSectionNumber() + "|" + last);
+                    targetNominationId = nominationIds.get(section.getSectionNumber() + "|" + nomineeKey);
                 }
                 if (targetNominationId == null) {
-                    targetNominationId = nominationIds.get("LAST|" + last);
+                    targetNominationId = nominationIds.get("NOM|" + nomineeKey);
                 }
             }
 
@@ -451,15 +458,14 @@ public class ScoringPersistence {
         return null;
     }
 
-    private static String inferRole(SpeakerTurn turn, Map<String, NomineeInfo> nomineeByLastName) {
+    private static String inferRole(SpeakerTurn turn, NomineeInfo nomineeSpeaker) {
         String title = turn.getTitle();
-        String last = turn.getLastName() != null ? turn.getLastName().toLowerCase() : "";
 
         if (SENATOR_TITLES.contains(title)) {
             return "SENATOR";
         }
 
-        if (nomineeByLastName.containsKey(last)) {
+        if (nomineeSpeaker != null) {
             return "NOMINEE";
         }
 
@@ -468,6 +474,58 @@ public class ScoringPersistence {
         }
 
         return "OTHER";
+    }
+
+    private static NomineeInfo findNomineeSpeakerForTurn(
+            SpeakerTurn turn,
+            HearingSection section,
+            Map<Integer, Map<String, NomineeInfo>> sectionNominees,
+            Map<String, NomineeInfo> nomineeByKey) {
+        if (turn.getLastName() == null || turn.getLastName().isBlank()) {
+            return null;
+        }
+
+        List<NomineeInfo> candidates = new ArrayList<>();
+        String last = turn.getLastName();
+
+        if (section != null) {
+            Map<String, NomineeInfo> scoped = sectionNominees.getOrDefault(
+                section.getSectionNumber(), Collections.emptyMap()
+            );
+            for (NomineeInfo nominee : scoped.values()) {
+                if (nominee.getLastName().equalsIgnoreCase(last)) {
+                    candidates.add(nominee);
+                }
+            }
+        }
+
+        if (candidates.isEmpty()) {
+            for (NomineeInfo nominee : nomineeByKey.values()) {
+                if (nominee.getLastName().equalsIgnoreCase(last)) {
+                    candidates.add(nominee);
+                }
+            }
+        }
+
+        if (candidates.size() == 1) {
+            return candidates.get(0);
+        }
+
+        if (NOMINEE_TITLES.contains(turn.getTitle())) {
+            for (NomineeInfo nominee : candidates) {
+                if (nominee.getTitleUsed().equalsIgnoreCase(turn.getTitle())) {
+                    return nominee;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static String nomineeKey(NomineeInfo nominee) {
+        String first = nominee.getFirstName() != null ? nominee.getFirstName().trim().toLowerCase(Locale.ROOT) : "";
+        String last = nominee.getLastName() != null ? nominee.getLastName().trim().toLowerCase(Locale.ROOT) : "";
+        return first + "|" + last;
     }
 
     private static int getOrCreateSpeaker(DatabaseManager db,

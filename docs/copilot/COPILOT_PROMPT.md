@@ -4,6 +4,69 @@ Use this as your initial prompt in Copilot Chat (or paste into a COPILOT_CONTEXT
 
 ---
 
+## Authoritative Status Snapshot (2026-04-08)
+
+This section is the current source of truth. If anything below conflicts with this snapshot, follow this snapshot.
+
+### Current state (implemented and validated)
+
+- Core pipeline is operational end-to-end for both `.txt` and `.docx` inputs.
+- `TurnScorer` now reads `.docx` directly via Apache POI (`loadTranscriptText`), so Java runtime does not require PowerShell docx extraction.
+- DB persistence is enabled by default; `--no-db` disables DB writes per run.
+- Output commit semantics are hardened:
+  - With DB enabled, reports are first written as `.json.pending` and `.txt.pending`.
+  - Pending files are promoted to final filenames only after DB persistence succeeds.
+  - Pending files are cleaned up on DB failure.
+- DB failure handling in `TurnScorer.finalizeRun(...)` now catches `Throwable` (not just `Exception`) for safer cleanup; `VirtualMachineError` is rethrown.
+- Pipeline fail-fast guardrails are in place:
+  - Stops with a clear error if no turns are parsed.
+  - Stops with a clear error if no substantive turns are scored.
+- Output metadata includes `avgSentimentConfidence` from CoreNLP prediction vectors.
+- GUI batching safeguards are in place in `SentimentAnalysisApp`:
+  - Effective worker cap (`MAX_SAFE_BATCH_WORKERS = 2`) to avoid overloading CoreNLP + DB.
+  - Batch run summary state is reset at batch start to avoid stale status display.
+
+### Validation matrix completed in this workspace
+
+- TXT run with DB disabled: successful.
+- DOCX run with DB disabled: successful.
+- DB-enabled run with current credentials: successful end-to-end.
+- DB run confirmed inserts into hearing/run/turn/score data path and produces output reports.
+
+### Reliable runtime commands (Windows / PowerShell)
+
+```powershell
+# 1) Compile
+.\mvnw.cmd -q -DskipTests compile
+
+# 2) Ensure runtime dependencies are present under target\dependency
+.\mvnw.cmd -q dependency:copy-dependencies -DincludeScope=runtime
+
+# 3a) Smoke run without DB
+java -cp "target\classes;target\dependency\*" TurnScorer -o output --no-db input\qa_exchange_test.txt
+
+# 3b) DB-enabled run
+java -cp "target\classes;target\dependency\*" TurnScorer -o output input\qa_exchange_test.txt
+```
+
+### Open item (deferred by user, medium priority)
+
+- Runtime logging binding is still missing, causing SLF4J fallback warning output.
+- Planned fix when resumed: add an SLF4J binding (recommended: `org.slf4j:slf4j-simple`) in `pom.xml`.
+
+### Deferred low-priority cleanup items
+
+- Warning-only cleanup in code can wait:
+  - Unused constants in `TurnScorer`.
+  - Unused import in `SpeakerTurnParser`.
+  - One generics/null-safety warning in `TargetResolver` debug counting path.
+
+### Guidance for future Copilot sessions
+
+- Treat current runtime and DB behavior as the stable baseline.
+- Prioritize logging binding improvement before non-functional warning cleanup.
+- Do not revert the pending-file commit flow or broadened DB-failure cleanup unless explicitly requested.
+
 ## Prompt:
 
 I am building a year-long Java research project for my Computer Science program at Concordia College. The project is a **Senate Confirmation Hearing Sentiment Analysis Platform**. Here is the full context:

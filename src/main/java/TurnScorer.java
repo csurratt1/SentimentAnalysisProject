@@ -7,6 +7,9 @@ import edu.stanford.nlp.neural.rnn.RNNCoreAnnotations;
 
 import javax.json.*;
 import javax.json.stream.JsonGenerator;
+import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.ejml.simple.SimpleMatrix;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -76,6 +79,39 @@ public class TurnScorer {
         public boolean isDbPersisted() { return dbPersisted; }
         public String getDbMessage() { return dbMessage; }
         public ScoringPersistence.PersistenceResult getDbSummary() { return dbSummary; }
+    }
+
+    /**
+     * In-memory analysis output used for preview-before-save workflows.
+     */
+    public static class AnalysisBundle {
+        private final String inputFile;
+        private final List<String> lines;
+        private final List<ResolvedTarget> resolved;
+        private final List<ScoredTurn> scored;
+        private final Map<String, InteractionScore> interactions;
+        private final long elapsedMs;
+
+        public AnalysisBundle(String inputFile,
+                              List<String> lines,
+                              List<ResolvedTarget> resolved,
+                              List<ScoredTurn> scored,
+                              Map<String, InteractionScore> interactions,
+                              long elapsedMs) {
+            this.inputFile = inputFile;
+            this.lines = lines;
+            this.resolved = resolved;
+            this.scored = scored;
+            this.interactions = interactions;
+            this.elapsedMs = elapsedMs;
+        }
+
+        public String getInputFile() { return inputFile; }
+        public List<String> getLines() { return lines; }
+        public List<ResolvedTarget> getResolved() { return resolved; }
+        public List<ScoredTurn> getScored() { return scored; }
+        public Map<String, InteractionScore> getInteractions() { return interactions; }
+        public long getElapsedMs() { return elapsedMs; }
     }
 
     // ── Sentiment labels and mapping ─────────────────────────────────────
@@ -155,14 +191,28 @@ public class TurnScorer {
         if (sentences == null || sentences.isEmpty()) return null;
 
         int totalScore = 0;
+        double totalSentimentConfidence = 0.0;
         for (CoreMap sentence : sentences) {
             Tree tree = sentence.get(
                 SentimentCoreAnnotations.SentimentAnnotatedTree.class);
             int classIdx = RNNCoreAnnotations.getPredictedClass(tree);
             totalScore += toScore(classIdx);
+
+            SimpleMatrix predictions = RNNCoreAnnotations.getPredictions(tree);
+            double sentenceConfidence = 0.0;
+            if (predictions != null) {
+                for (int idx = 0; idx < predictions.getNumElements(); idx++) {
+                    sentenceConfidence = Math.max(sentenceConfidence, predictions.get(idx));
+                }
+            }
+            totalSentimentConfidence += sentenceConfidence;
         }
 
-        return new ScoredTurn(resolved, sentences.size(), totalScore);
+        double avgSentimentConfidence = sentences.isEmpty()
+            ? 0.0
+            : totalSentimentConfidence / sentences.size();
+
+        return new ScoredTurn(resolved, sentences.size(), totalScore, avgSentimentConfidence);
     }
 
     // ── Report generation ────────────────────────────────────────────────
@@ -294,6 +344,7 @@ public class TurnScorer {
         int scoredSenatorTurns = 0;
         int totalSentences = 0;
         double totalConfidence = 0;
+        double totalSentimentConfidence = 0;
         int confCount = 0;
 
         for (ScoredTurn st : scored) {
@@ -304,6 +355,7 @@ public class TurnScorer {
                 scoredSenatorTurns++;
             }
             totalConfidence += st.getTarget().getConfidence();
+            totalSentimentConfidence += st.getAvgSentimentConfidence();
             confCount++;
         }
 
@@ -318,6 +370,8 @@ public class TurnScorer {
         out.printf("  Unique senator→nominee pairs: %d%n", interactions.size());
         out.printf("  Avg resolution confidence:    %.2f%n",
             confCount > 0 ? totalConfidence / confCount : 0.0);
+        out.printf("  Avg sentiment confidence:     %.2f%n",
+            confCount > 0 ? totalSentimentConfidence / confCount : 0.0);
         out.printf("  Total scoring time:           %.1f seconds%n",
             elapsedMs / 1000.0);
         out.println();
@@ -364,6 +418,80 @@ public class TurnScorer {
                                 Map<String, InteractionScore> interactions,
                                 long elapsedMs) throws IOException {
 
+        JsonObject root = buildJsonObject(inputFile, resolved, scored, interactions, elapsedMs);
+
+        // ── Write with pretty-printing ──
+        Map<String, Object> writerConfig = new HashMap<>();
+        writerConfig.put(JsonGenerator.PRETTY_PRINTING, true);
+        JsonWriterFactory factory = Json.createWriterFactory(writerConfig);
+
+        try (OutputStream os = Files.newOutputStream(jsonPath);
+             JsonWriter writer = factory.createWriter(os)) {
+            writer.writeObject(root);
+        }
+    }
+
+    static String buildJsonPreview(AnalysisBundle analysis) {
+        JsonObject root = buildJsonObject(
+            analysis.getInputFile(),
+            analysis.getResolved(),
+            analysis.getScored(),
+            analysis.getInteractions(),
+            analysis.getElapsedMs()
+        );
+
+        Map<String, Object> writerConfig = new HashMap<>();
+        writerConfig.put(JsonGenerator.PRETTY_PRINTING, true);
+        JsonWriterFactory factory = Json.createWriterFactory(writerConfig);
+
+        StringWriter sw = new StringWriter();
+        try (JsonWriter writer = factory.createWriter(sw)) {
+            writer.writeObject(root);
+        }
+        return sw.toString();
+    }
+
+    static String buildTextPreview(AnalysisBundle analysis, boolean verbose) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (PrintStream out = new PrintStream(baos, true, "UTF-8")) {
+            out.println("=".repeat(70));
+            out.println("  Senate Hearing Sentiment Analysis — Full Pipeline");
+            out.println("=".repeat(70));
+            out.println();
+            printScoreKey(out);
+            printTurnDetail(out, analysis.getScored(), verbose);
+            printNomineeScorecard(out, analysis.getInteractions(), analysis.getScored());
+            printSenatorProfile(out, analysis.getInteractions());
+            printSummary(out, analysis.getResolved(), analysis.getScored(), analysis.getInteractions(), analysis.getElapsedMs());
+        }
+        return baos.toString(StandardCharsets.UTF_8);
+    }
+
+    private static void printScoreKey(PrintStream out) {
+        out.println("SCORE KEY");
+        out.println("-".repeat(70));
+        out.println("CoreNLP class -> project score mapping:");
+        out.println("  0 Very Negative -> -2");
+        out.println("  1 Negative      -> -1");
+        out.println("  2 Neutral       ->  0");
+        out.println("  3 Positive      -> +1");
+        out.println("  4 Very Positive -> +2");
+        out.println();
+        out.println("Interpretation (avg/weighted scores):");
+        out.println("  <= -1.00         Strongly opposing");
+        out.println("  -1.00..-0.25     Mildly opposing");
+        out.println("  -0.25..+0.25     Neutral or mixed");
+        out.println("  +0.25..+1.00     Mildly supportive");
+        out.println("  >= +1.00         Strongly supportive");
+        out.println();
+    }
+
+    private static JsonObject buildJsonObject(String inputFile,
+                                              List<ResolvedTarget> resolved,
+                                              List<ScoredTurn> scored,
+                                              Map<String, InteractionScore> interactions,
+                                              long elapsedMs) {
+
         // ── Build turn-level array ──
         JsonArrayBuilder turnsArr = Json.createArrayBuilder();
         for (ScoredTurn st : scored) {
@@ -379,6 +507,7 @@ public class TurnScorer {
                 .add("target",            targetName)
                 .add("resolutionMethod",  rt.getMethod().toString())
                 .add("confidence",        round4(rt.getConfidence()))
+                .add("sentimentConfidence", round4(st.getAvgSentimentConfidence()))
                 .add("sentenceCount",     st.getSentenceCount())
                 .add("totalScore",        st.getTotalScore())
                 .add("avgScore",          round4(st.getAvgScore()))
@@ -442,9 +571,11 @@ public class TurnScorer {
         // ── Compute summary stats ──
         int selfTurns = 0, senatorTurns = 0, totalSentences = 0;
         double totalConf = 0;
+        double totalSentimentConf = 0;
         for (ScoredTurn st : scored) {
             totalSentences += st.getSentenceCount();
             totalConf += st.getTarget().getConfidence();
+            totalSentimentConf += st.getAvgSentimentConfidence();
             if (st.isSelfTurn()) selfTurns++;
             else senatorTurns++;
         }
@@ -456,6 +587,22 @@ public class TurnScorer {
                 .add("scoredAt",           LocalDateTime.now().format(
                     DateTimeFormatter.ISO_LOCAL_DATE_TIME))
                 .add("parserModel",        "englishSR.beam.ser.gz")
+                .add("scoreKey", Json.createObjectBuilder()
+                    .add("classToScore", Json.createArrayBuilder()
+                        .add(Json.createObjectBuilder().add("class", 0).add("label", "Very Negative").add("score", -2))
+                        .add(Json.createObjectBuilder().add("class", 1).add("label", "Negative").add("score", -1))
+                        .add(Json.createObjectBuilder().add("class", 2).add("label", "Neutral").add("score", 0))
+                        .add(Json.createObjectBuilder().add("class", 3).add("label", "Positive").add("score", 1))
+                        .add(Json.createObjectBuilder().add("class", 4).add("label", "Very Positive").add("score", 2))
+                    )
+                    .add("interpretationBands", Json.createArrayBuilder()
+                        .add(Json.createObjectBuilder().add("min", -2.0).add("max", -1.0).add("meaning", "Strongly opposing"))
+                        .add(Json.createObjectBuilder().add("min", -1.0).add("max", -0.25).add("meaning", "Mildly opposing"))
+                        .add(Json.createObjectBuilder().add("min", -0.25).add("max", 0.25).add("meaning", "Neutral or mixed"))
+                        .add(Json.createObjectBuilder().add("min", 0.25).add("max", 1.0).add("meaning", "Mildly supportive"))
+                        .add(Json.createObjectBuilder().add("min", 1.0).add("max", 2.0).add("meaning", "Strongly supportive"))
+                    )
+                )
                 .add("totalTurns",         resolved.size())
                 .add("scoredTurns",        scored.size())
                 .add("senatorTurns",       senatorTurns)
@@ -465,6 +612,8 @@ public class TurnScorer {
                 .add("uniquePairs",        interactions.size())
                 .add("avgConfidence",      round4(scored.isEmpty() ? 0.0
                     : totalConf / scored.size()))
+                .add("avgSentimentConfidence", round4(scored.isEmpty() ? 0.0
+                    : totalSentimentConf / scored.size()))
                 .add("scoringTimeSeconds", round4(elapsedMs / 1000.0))
             )
             .add("turns",        turnsArr)
@@ -472,15 +621,7 @@ public class TurnScorer {
             .add("nominees",     nomineesArr)
             .build();
 
-        // ── Write with pretty-printing ──
-        Map<String, Object> writerConfig = new HashMap<>();
-        writerConfig.put(JsonGenerator.PRETTY_PRINTING, true);
-        JsonWriterFactory factory = Json.createWriterFactory(writerConfig);
-
-        try (OutputStream os = Files.newOutputStream(jsonPath);
-             JsonWriter writer = factory.createWriter(os)) {
-            writer.writeObject(root);
-        }
+        return root;
     }
 
     /** Round to 4 decimal places for JSON output. */
@@ -515,6 +656,7 @@ public class TurnScorer {
             out.println("  Senate Hearing Sentiment Analysis — Full Pipeline");
             out.println("=".repeat(70));
             out.println();
+            printScoreKey(out);
             printTurnDetail(out, scored, verbose);
             printNomineeScorecard(out, interactions, scored);
             printSenatorProfile(out, interactions);
@@ -524,34 +666,47 @@ public class TurnScorer {
 
     // ── Main: standalone runner ──────────────────────────────────────────
 
-    public static RunResult runPipeline(String filePath,
-                                         String outputDir,
-                                         boolean verbose,
-                                         boolean persistDb) throws IOException {
+    public static AnalysisBundle analyzeOnly(String filePath,
+                                             boolean verbose,
+                                             boolean printConsole) throws IOException {
 
         if (filePath == null || filePath.isBlank()) {
             throw new IllegalArgumentException("Input transcript file is required.");
         }
 
-        // 1. Read input text
-        String text = new String(Files.readAllBytes(Paths.get(filePath)),
-                                 StandardCharsets.UTF_8);
+        // 1. Read input text (supports .txt and .docx)
+        String text = loadTranscriptText(filePath);
 
-        System.out.println();
-        System.out.println("=".repeat(70));
-        System.out.println("  Senate Hearing Sentiment Analysis — Full Pipeline");
-        System.out.println("=".repeat(70));
-        System.out.println();
+        if (printConsole) {
+            System.out.println();
+            System.out.println("=".repeat(70));
+            System.out.println("  Senate Hearing Sentiment Analysis — Full Pipeline");
+            System.out.println("=".repeat(70));
+            System.out.println();
+        }
 
         // 3. Parse speaker turns
-        System.out.println("[1/4] Parsing speaker turns...");
+        if (printConsole) {
+            System.out.println("[1/4] Parsing speaker turns...");
+        }
         String[] rawLines = text.split("\\r?\\n");
         List<String> lines = Arrays.asList(rawLines);
         List<SpeakerTurn> turns = SpeakerTurnParser.parse(lines);
-        System.out.printf("       %d turns from %d lines%n", turns.size(), lines.size());
+        if (turns.isEmpty()) {
+            throw new IOException(
+                "No speaker turns were parsed from input file: "
+                    + Paths.get(filePath).getFileName()
+                    + ". Check the transcript format and ensure it contains speaker-labeled text."
+            );
+        }
+        if (printConsole) {
+            System.out.printf("       %d turns from %d lines%n", turns.size(), lines.size());
+        }
 
         // 4. Resolve targets
-        System.out.println("[2/4] Resolving targets...");
+        if (printConsole) {
+            System.out.println("[2/4] Resolving targets...");
+        }
         List<ResolvedTarget> resolved = TargetResolver.resolve(turns, lines);
 
         int selfCount = 0, specificCount = 0;
@@ -559,16 +714,20 @@ public class TurnScorer {
             if (rt.isSelfTurn()) selfCount++;
             else if (rt.hasSpecificTarget()) specificCount++;
         }
-        System.out.printf("       %d self-turns, %d targeted, %d other%n",
-            selfCount, specificCount, resolved.size() - selfCount - specificCount);
-        if (specificCount == 0) {
-            System.out.println("[WARN] No specific nominee targets were resolved.");
-            System.out.println("       Reports may contain little/no senator->nominee interaction data.");
-            System.out.println("       Use a transcript that includes NOMINATIONS headers or full hearing context.");
+        if (printConsole) {
+            System.out.printf("       %d self-turns, %d targeted, %d other%n",
+                selfCount, specificCount, resolved.size() - selfCount - specificCount);
+            if (specificCount == 0) {
+                System.out.println("[WARN] No specific nominee targets were resolved.");
+                System.out.println("       Reports may contain little/no senator->nominee interaction data.");
+                System.out.println("       Use a transcript that includes NOMINATIONS headers or full hearing context.");
+            }
         }
 
         // 5. Build CoreNLP pipeline (this is the slow step)
-        System.out.println("[3/4] Loading CoreNLP models...");
+        if (printConsole) {
+            System.out.println("[3/4] Loading CoreNLP models...");
+        }
         long pipelineStart = System.currentTimeMillis();
 
         Properties props = new Properties();
@@ -581,10 +740,14 @@ public class TurnScorer {
         StanfordCoreNLP pipeline = new StanfordCoreNLP(props);
 
         long pipelineMs = System.currentTimeMillis() - pipelineStart;
-        System.out.printf("       Pipeline ready (%.1f seconds)%n", pipelineMs / 1000.0);
+        if (printConsole) {
+            System.out.printf("       Pipeline ready (%.1f seconds)%n", pipelineMs / 1000.0);
+        }
 
         // 6. Score each turn
-        System.out.println("[4/4] Scoring turns through CoreNLP...");
+        if (printConsole) {
+            System.out.println("[4/4] Scoring turns through CoreNLP...");
+        }
         long scoreStart = System.currentTimeMillis();
 
         List<ScoredTurn> scored = new ArrayList<>();
@@ -599,28 +762,95 @@ public class TurnScorer {
 
             // Progress indicator every 25 turns
             if (processedCount % 25 == 0 || processedCount == resolved.size()) {
-                System.out.printf("       %d / %d turns scored...%n",
-                    processedCount, resolved.size());
-                System.out.flush();
+                if (printConsole) {
+                    System.out.printf("       %d / %d turns scored...%n",
+                        processedCount, resolved.size());
+                    System.out.flush();
+                }
             }
         }
 
         long scoreMs = System.currentTimeMillis() - scoreStart;
         long totalMs = System.currentTimeMillis() - pipelineStart;
-        System.out.printf("       Scoring done (%.1f seconds)%n", scoreMs / 1000.0);
-        System.out.println();
+
+        if (scored.isEmpty()) {
+            throw new IOException(
+                "No substantive turns were scored from input file: "
+                    + Paths.get(filePath).getFileName()
+                    + ". Check transcript formatting and speaker labels before committing output."
+            );
+        }
+
+        if (printConsole) {
+            System.out.printf("       Scoring done (%.1f seconds)%n", scoreMs / 1000.0);
+            System.out.println();
+        }
 
         // 7. Aggregate
         Map<String, InteractionScore> interactions = aggregate(scored);
 
         // 8. Print to console
-        printTurnDetail(System.out, scored, verbose);
-        printNomineeScorecard(System.out, interactions, scored);
-        printSenatorProfile(System.out, interactions);
-        printSummary(System.out, resolved, scored, interactions, totalMs);
+        if (printConsole) {
+            printTurnDetail(System.out, scored, verbose);
+            printNomineeScorecard(System.out, interactions, scored);
+            printSenatorProfile(System.out, interactions);
+            printSummary(System.out, resolved, scored, interactions, totalMs);
+        }
+
+        return new AnalysisBundle(filePath, lines, resolved, scored, interactions, totalMs);
+    }
+
+    private static String loadTranscriptText(String filePath) throws IOException {
+        Path inputPath = Paths.get(filePath);
+        String fileName = inputPath.getFileName().toString();
+        String lower = fileName.toLowerCase(Locale.ROOT);
+
+        if (lower.endsWith(".txt")) {
+            String text = Files.readString(inputPath, StandardCharsets.UTF_8);
+            if (text.isBlank()) {
+                throw new IOException("Input text file is empty: " + fileName);
+            }
+            return text;
+        }
+
+        if (lower.endsWith(".docx")) {
+            try (InputStream is = Files.newInputStream(inputPath);
+                 XWPFDocument document = new XWPFDocument(is);
+                 XWPFWordExtractor extractor = new XWPFWordExtractor(document)) {
+                String text = extractor.getText();
+                if (text == null || text.isBlank()) {
+                    throw new IOException("Input DOCX file has no extractable text: " + fileName);
+                }
+                return text;
+            }
+        }
+
+        throw new IOException(
+            "Unsupported input format for "
+                + fileName
+                + ". Supported formats are .txt and .docx"
+        );
+    }
+
+    public static RunResult finalizeRun(AnalysisBundle analysis,
+                                        String outputDir,
+                                        boolean verbose,
+                                        boolean persistDb) throws IOException {
+        if (analysis == null) {
+            throw new IllegalArgumentException("Analysis bundle is required.");
+        }
+
+        List<ResolvedTarget> resolved = analysis.getResolved();
+        List<ScoredTurn> scored = analysis.getScored();
+        Map<String, InteractionScore> interactions = analysis.getInteractions();
+        long totalMs = analysis.getElapsedMs();
+        String filePath = analysis.getInputFile();
+        List<String> lines = analysis.getLines();
 
         Path jsonFile = null;
         Path txtFile = null;
+        Path pendingJsonFile = null;
+        Path pendingTxtFile = null;
 
         // 9. Write output files if output directory was specified
         if (outputDir != null) {
@@ -635,18 +865,19 @@ public class TurnScorer {
             jsonFile = outDir.resolve(scorePrefix + ".json");
             txtFile  = outDir.resolve(scorePrefix + ".txt");
 
-            writeJsonOutput(jsonFile, filePath, resolved, scored,
-                            interactions, totalMs);
-            writeTextReport(txtFile, verbose, resolved, scored,
-                            interactions, totalMs);
+            Path jsonWriteTarget = jsonFile;
+            Path txtWriteTarget = txtFile;
+            if (persistDb) {
+                pendingJsonFile = outDir.resolve(scorePrefix + ".json.pending");
+                pendingTxtFile = outDir.resolve(scorePrefix + ".txt.pending");
+                jsonWriteTarget = pendingJsonFile;
+                txtWriteTarget = pendingTxtFile;
+            }
 
-            System.out.println("=".repeat(70));
-            System.out.println("  OUTPUT FILES");
-            System.out.println("=".repeat(70));
-            System.out.printf("  JSON: %s%n", jsonFile);
-            System.out.printf("  TXT:  %s%n", txtFile);
-            System.out.printf("  Naming: score_<inputLabel>_<timestamp>.{json,txt}%n");
-            System.out.println();
+            writeJsonOutput(jsonWriteTarget, filePath, resolved, scored,
+                            interactions, totalMs);
+            writeTextReport(txtWriteTarget, verbose, resolved, scored,
+                            interactions, totalMs);
         }
 
         // 10. Persist to database
@@ -672,15 +903,31 @@ public class TurnScorer {
                     + ", run="
                     + dbSummary.getScoringRunId()
                     + ").";
-            } catch (Exception e) {
-                System.err.println("[DB] Persistence failed: " + e.getMessage());
-                if (verbose) {
-                    e.printStackTrace(System.err);
+
+                if (pendingJsonFile != null && pendingTxtFile != null) {
+                    promotePendingOutput(pendingJsonFile, jsonFile);
+                    promotePendingOutput(pendingTxtFile, txtFile);
                 }
-                dbMessage = "Persistence failed: " + e.getMessage();
+            } catch (Throwable t) {
+                System.err.println("[DB] Persistence failed: " + t.getMessage());
+                if (verbose) {
+                    t.printStackTrace(System.err);
+                }
+                deleteIfExistsQuietly(pendingJsonFile);
+                deleteIfExistsQuietly(pendingTxtFile);
+                jsonFile = null;
+                txtFile = null;
+                dbMessage = "Persistence failed: " + t.getMessage();
+                if (t instanceof VirtualMachineError) {
+                    throw (VirtualMachineError) t;
+                }
             }
         } else {
             dbMessage = "DB persistence skipped (--no-db).";
+        }
+
+        if (jsonFile != null && txtFile != null) {
+            printOutputFilesBanner(jsonFile, txtFile);
         }
 
         return new RunResult(
@@ -693,6 +940,38 @@ public class TurnScorer {
             dbMessage,
             dbSummary
         );
+    }
+
+    private static void promotePendingOutput(Path pending, Path target) throws IOException {
+        if (pending == null || target == null || !Files.exists(pending)) return;
+        Files.move(pending, target, StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    private static void deleteIfExistsQuietly(Path path) {
+        if (path == null) return;
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException ignored) {
+            // Best effort cleanup for temporary files.
+        }
+    }
+
+    private static void printOutputFilesBanner(Path jsonFile, Path txtFile) {
+        System.out.println("=".repeat(70));
+        System.out.println("  OUTPUT FILES");
+        System.out.println("=".repeat(70));
+        System.out.printf("  JSON: %s%n", jsonFile);
+        System.out.printf("  TXT:  %s%n", txtFile);
+        System.out.printf("  Naming: score_<inputLabel>_<timestamp>.{json,txt}%n");
+        System.out.println();
+    }
+
+    public static RunResult runPipeline(String filePath,
+                                        String outputDir,
+                                        boolean verbose,
+                                        boolean persistDb) throws IOException {
+        AnalysisBundle analysis = analyzeOnly(filePath, verbose, true);
+        return finalizeRun(analysis, outputDir, verbose, persistDb);
     }
 
     public static void main(String[] args) throws IOException {

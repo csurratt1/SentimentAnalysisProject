@@ -2,6 +2,11 @@ import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.regex.*;
+import edu.stanford.nlp.ling.CoreAnnotations;
+import edu.stanford.nlp.ling.CoreLabel;
+import edu.stanford.nlp.pipeline.Annotation;
+import edu.stanford.nlp.pipeline.StanfordCoreNLP;
+import edu.stanford.nlp.util.CoreMap;
 
 /**
  * TargetResolver.java
@@ -64,8 +69,12 @@ public class TargetResolver {
 
     /** Detects direct-address patterns in turn text. */
     private static final Pattern DIRECT_ADDRESS = Pattern.compile(
-        "(?:Judge|Ms\\.|Mr\\.|Mrs\\.)\\s+(\\w+),"
+        "(?:Judge|Ms\\.|Mr\\.|Mrs\\.)\\s+([A-Za-z][A-Za-z'\\-]+),",
+        Pattern.CASE_INSENSITIVE
     );
+
+    private static volatile StanfordCoreNLP nerPipeline;
+    private static final Object NER_LOCK = new Object();
 
     // ── Known nominee titles (for identifying nominee turns) ─────────────
 
@@ -92,17 +101,10 @@ public class TargetResolver {
         // 1. Detect hearing sections (nominee panels)
         List<HearingSection> sections = detectSections(lines);
 
-        // 2. Build a map: nominee lastName → NomineeInfo (across all sections)
-        Map<String, NomineeInfo> allNominees = new LinkedHashMap<>();
-        for (HearingSection sec : sections) {
-            for (NomineeInfo n : sec.getNominees()) {
-                allNominees.put(n.getLastName().toLowerCase(), n);
-            }
-        }
-
-        // 2b. Correct nominee titles from how they actually appear in
-        //     transcript turns (more reliable than header inference).
-        correctNomineeTitlesFromTurns(turns, allNominees, sections);
+        // 2. Correct nominee titles from how they appear in transcript turns,
+        //    then build nominee indexes.
+        correctNomineeTitlesFromTurns(turns, sections);
+        Map<String, List<NomineeInfo>> nomineesByLastName = indexNomineesByLastName(sections);
 
         // 3. Resolve each turn
         List<ResolvedTarget> results = new ArrayList<>();
@@ -119,7 +121,9 @@ public class TargetResolver {
 
             // ── A) Self-detection: is the speaker a nominee? ──
             if (NOMINEE_TITLES.contains(turn.getTitle())) {
-                NomineeInfo self = allNominees.get(turn.getLastName().toLowerCase());
+                NomineeInfo self = resolveNomineeByLastName(
+                    turn.getLastName(), section, nomineesByLastName, null
+                );
                 if (self != null) {
                     currentTarget = self;
                     results.add(new ResolvedTarget(turn, self, panelNominees,
@@ -129,7 +133,9 @@ public class TargetResolver {
             }
 
             // ── B) Direct address: speaker names a nominee in their text ──
-            NomineeInfo directTarget = findDirectAddress(turn.getText(), allNominees);
+            NomineeInfo directTarget = findDirectAddress(
+                turn.getText(), section, nomineesByLastName
+            );
             if (directTarget != null) {
                 currentTarget = directTarget;
                 results.add(new ResolvedTarget(turn, directTarget, panelNominees,
@@ -141,8 +147,13 @@ public class TargetResolver {
             if (SENATOR_TITLES.contains(turn.getTitle()) && i + 1 < turns.size()) {
                 SpeakerTurn nextTurn = turns.get(i + 1);
                 if (NOMINEE_TITLES.contains(nextTurn.getTitle())) {
-                    NomineeInfo responder = allNominees.get(
-                        nextTurn.getLastName().toLowerCase());
+                    HearingSection nextSection = findSection(nextTurn.getStartLine(), sections);
+                    NomineeInfo responder = resolveNomineeByLastName(
+                        nextTurn.getLastName(),
+                        nextSection != null ? nextSection : section,
+                        nomineesByLastName,
+                        null
+                    );
                     if (responder != null) {
                         currentTarget = responder;
                         results.add(new ResolvedTarget(turn, responder,
@@ -292,14 +303,23 @@ public class TargetResolver {
      * Returns the first matching nominee, or null.
      */
     static NomineeInfo findDirectAddress(String text,
-                                         Map<String, NomineeInfo> nominees) {
+                                         HearingSection section,
+                                         Map<String, List<NomineeInfo>> nomineesByLastName) {
+        if (text == null || text.isBlank()) return null;
+
         Matcher m = DIRECT_ADDRESS.matcher(text);
         while (m.find()) {
-            String name = m.group(1).toLowerCase();
-            NomineeInfo match = nominees.get(name);
+            String name = normalizeNamePart(m.group(1));
+            NomineeInfo match = resolveNomineeByLastName(
+                name,
+                section,
+                nomineesByLastName,
+                null
+            );
             if (match != null) return match;
         }
-        return null;
+
+        return findDirectAddressWithNer(text, section, nomineesByLastName);
     }
 
     // ── Title correction from transcript usage ──────────────────────────
@@ -312,30 +332,175 @@ public class TargetResolver {
      */
     private static void correctNomineeTitlesFromTurns(
             List<SpeakerTurn> turns,
-            Map<String, NomineeInfo> allNominees,
             List<HearingSection> sections) {
 
         for (SpeakerTurn turn : turns) {
             if (!NOMINEE_TITLES.contains(turn.getTitle())) continue;
-            String key = turn.getLastName().toLowerCase();
-            NomineeInfo existing = allNominees.get(key);
+            HearingSection section = findSection(turn.getStartLine(), sections);
+            if (section == null) continue;
+
+            NomineeInfo existing = null;
+            for (NomineeInfo nominee : section.getNominees()) {
+                if (!nominee.getLastName().equalsIgnoreCase(turn.getLastName())) continue;
+                if (existing == null) {
+                    existing = nominee;
+                }
+                if (nominee.getTitleUsed().equalsIgnoreCase(turn.getTitle())) {
+                    existing = nominee;
+                    break;
+                }
+            }
             if (existing == null) continue;
 
             String actualTitle = turn.getTitle();
             if (!actualTitle.equals(existing.getTitleUsed())) {
-                // Replace with corrected version
                 NomineeInfo corrected = new NomineeInfo(
                     existing.getFirstName(), existing.getLastName(),
                     existing.getPosition(), actualTitle);
-                allNominees.put(key, corrected);
-                // Also update in the sections
-                for (HearingSection sec : sections) {
-                    if (sec.findNominee(existing.getLastName()) != null) {
-                        sec.addNominee(corrected);  // overwrites by lastName key
+                section.addNominee(corrected);
+            }
+        }
+    }
+
+    private static Map<String, List<NomineeInfo>> indexNomineesByLastName(List<HearingSection> sections) {
+        Map<String, List<NomineeInfo>> index = new LinkedHashMap<>();
+        for (HearingSection section : sections) {
+            for (NomineeInfo nominee : section.getNominees()) {
+                String key = normalizeNamePart(nominee.getLastName()).toLowerCase();
+                index.computeIfAbsent(key, k -> new ArrayList<>());
+
+                boolean alreadyPresent = false;
+                for (NomineeInfo existing : index.get(key)) {
+                    if (existing.getFirstName().equalsIgnoreCase(nominee.getFirstName())
+                            && existing.getLastName().equalsIgnoreCase(nominee.getLastName())) {
+                        alreadyPresent = true;
+                        break;
                     }
+                }
+                if (!alreadyPresent) {
+                    index.get(key).add(nominee);
                 }
             }
         }
+        return index;
+    }
+
+    private static NomineeInfo resolveNomineeByLastName(String lastName,
+                                                        HearingSection section,
+                                                        Map<String, List<NomineeInfo>> nomineesByLastName,
+                                                        String firstNameHint) {
+        if (lastName == null || lastName.isBlank()) return null;
+
+        String normalizedLast = normalizeNamePart(lastName);
+        String key = normalizedLast.toLowerCase();
+        List<NomineeInfo> candidates = nomineesByLastName.getOrDefault(key, Collections.emptyList());
+        if (candidates.isEmpty()) return null;
+
+        List<NomineeInfo> scoped = new ArrayList<>();
+        if (section != null) {
+            for (NomineeInfo nominee : section.getNominees()) {
+                if (normalizeNamePart(nominee.getLastName()).equalsIgnoreCase(normalizedLast)) {
+                    scoped.add(nominee);
+                }
+            }
+        }
+
+        List<NomineeInfo> working = scoped.isEmpty() ? candidates : scoped;
+        if (firstNameHint != null && !firstNameHint.isBlank()) {
+            String normalizedFirst = normalizeNamePart(firstNameHint);
+            List<NomineeInfo> firstFiltered = new ArrayList<>();
+            for (NomineeInfo nominee : working) {
+                if (normalizeNamePart(nominee.getFirstName()).equalsIgnoreCase(normalizedFirst)) {
+                    firstFiltered.add(nominee);
+                }
+            }
+            if (firstFiltered.size() == 1) {
+                return firstFiltered.get(0);
+            }
+            if (!firstFiltered.isEmpty()) {
+                working = firstFiltered;
+            }
+        }
+
+        return working.size() == 1 ? working.get(0) : null;
+    }
+
+    private static NomineeInfo findDirectAddressWithNer(String text,
+                                                        HearingSection section,
+                                                        Map<String, List<NomineeInfo>> nomineesByLastName) {
+        if (text == null || text.isBlank()) return null;
+
+        Annotation annotation = new Annotation(text);
+        getNerPipeline().annotate(annotation);
+
+        List<CoreMap> sentences = annotation.get(CoreAnnotations.SentencesAnnotation.class);
+        if (sentences == null) return null;
+
+        for (CoreMap sentence : sentences) {
+            List<CoreLabel> tokens = sentence.get(CoreAnnotations.TokensAnnotation.class);
+            if (tokens == null) continue;
+
+            StringBuilder mention = new StringBuilder();
+            for (CoreLabel token : tokens) {
+                String nerTag = token.get(CoreAnnotations.NamedEntityTagAnnotation.class);
+                String word = token.get(CoreAnnotations.TextAnnotation.class);
+
+                if ("PERSON".equals(nerTag)) {
+                    if (mention.length() > 0) mention.append(' ');
+                    mention.append(word);
+                } else if (mention.length() > 0) {
+                    NomineeInfo resolved = resolveNomineeFromMention(
+                        mention.toString(), section, nomineesByLastName
+                    );
+                    if (resolved != null) return resolved;
+                    mention.setLength(0);
+                }
+            }
+
+            if (mention.length() > 0) {
+                NomineeInfo resolved = resolveNomineeFromMention(
+                    mention.toString(), section, nomineesByLastName
+                );
+                if (resolved != null) return resolved;
+            }
+        }
+
+        return null;
+    }
+
+    private static NomineeInfo resolveNomineeFromMention(String mention,
+                                                         HearingSection section,
+                                                         Map<String, List<NomineeInfo>> nomineesByLastName) {
+        if (mention == null || mention.isBlank()) return null;
+
+        String[] parts = mention.trim().split("\\s+");
+        if (parts.length == 0) return null;
+
+        String first = normalizeNamePart(parts[0]);
+        String last = normalizeNamePart(parts[parts.length - 1]);
+
+        NomineeInfo exact = resolveNomineeByLastName(last, section, nomineesByLastName, first);
+        if (exact != null) return exact;
+
+        return resolveNomineeByLastName(last, section, nomineesByLastName, null);
+    }
+
+    private static StanfordCoreNLP getNerPipeline() {
+        if (nerPipeline == null) {
+            synchronized (NER_LOCK) {
+                if (nerPipeline == null) {
+                    Properties props = new Properties();
+                    props.setProperty("annotators", "tokenize,ssplit,pos,lemma,ner");
+                    nerPipeline = new StanfordCoreNLP(props);
+                }
+            }
+        }
+        return nerPipeline;
+    }
+
+    private static String normalizeNamePart(String value) {
+        if (value == null) return "";
+        return value.replaceAll("[^A-Za-z'\\-]", "").trim();
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────

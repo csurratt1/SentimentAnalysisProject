@@ -16,15 +16,24 @@ public class ScoredTurn {
     private final int    sentenceCount;   // how many sentences CoreNLP found
     private final int    totalScore;      // sum of per-sentence [-2,+2] scores
     private final double avgScore;        // totalScore / sentenceCount
+    private final double avgSentimentConfidence;
 
     public ScoredTurn(ResolvedTarget target, int sentenceCount,
                       int totalScore) {
+        this(target, sentenceCount, totalScore, 1.0);
+    }
+
+    public ScoredTurn(ResolvedTarget target,
+                      int sentenceCount,
+                      int totalScore,
+                      double avgSentimentConfidence) {
         this.target        = target;
         this.sentenceCount = sentenceCount;
         this.totalScore    = totalScore;
         this.avgScore      = sentenceCount > 0
             ? (double) totalScore / sentenceCount
             : 0.0;
+        this.avgSentimentConfidence = avgSentimentConfidence;
     }
 
     // ── Getters ──────────────────────────────────────────────────────────
@@ -33,6 +42,7 @@ public class ScoredTurn {
     public int            getSentenceCount() { return sentenceCount; }
     public int            getTotalScore()    { return totalScore; }
     public double         getAvgScore()      { return avgScore; }
+    public double         getAvgSentimentConfidence() { return avgSentimentConfidence; }
 
     /**
      * Returns the average score weighted by target-resolution confidence.

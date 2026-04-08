@@ -24,7 +24,7 @@ public class HearingSection {
     private final int    startLine;       // first line of this section (0-based)
     private       int    endLine;         // last line of this section (exclusive), set later
 
-    /** Nominees on this panel, keyed by last name. */
+    /** Nominees on this panel, keyed by normalized full name. */
     private final Map<String, NomineeInfo> nominees = new LinkedHashMap<>();
 
     public HearingSection(int sectionNumber, String headerText, String date,
@@ -39,7 +39,7 @@ public class HearingSection {
     // ── Nominee management ───────────────────────────────────────────────
 
     public void addNominee(NomineeInfo nominee) {
-        nominees.put(nominee.getLastName().toLowerCase(), nominee);
+        nominees.put(nomineeKey(nominee), nominee);
     }
 
     public Collection<NomineeInfo> getNominees() {
@@ -51,7 +51,17 @@ public class HearingSection {
      * Returns null if no match.
      */
     public NomineeInfo findNominee(String lastName) {
-        return nominees.get(lastName.toLowerCase());
+        if (lastName == null) return null;
+        for (NomineeInfo nominee : nominees.values()) {
+            if (nominee.getLastName().equalsIgnoreCase(lastName)) {
+                return nominee;
+            }
+        }
+        return null;
+    }
+
+    private String nomineeKey(NomineeInfo nominee) {
+        return (nominee.getFirstName() + "|" + nominee.getLastName()).toLowerCase();
     }
 
     /**
