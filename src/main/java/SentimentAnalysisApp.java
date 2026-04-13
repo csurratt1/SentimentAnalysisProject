@@ -1,5 +1,7 @@
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.ArrayList;
@@ -15,6 +17,18 @@ import java.util.concurrent.*;
 public class SentimentAnalysisApp {
 
     private static final int MAX_SAFE_BATCH_WORKERS = 2;
+    private static final Color COLOR_BG = new Color(0x0A0A0A);
+    private static final Color COLOR_SURFACE = new Color(0x141414);
+    private static final Color COLOR_SURFACE_ALT = new Color(0x1A1A1A);
+    private static final Color COLOR_BORDER = new Color(0x2A2A2A);
+    private static final Color COLOR_TEXT = new Color(0xE0E0E0);
+    private static final Color COLOR_TEXT_MUTED = new Color(0xA0A0A0);
+    private static final Color COLOR_TEXT_SUBTLE = new Color(0x808080);
+    private static final Color COLOR_ACCENT = new Color(0x2563EB);
+    private static final Color COLOR_ACCENT_HOVER = new Color(0x3B82F6);
+    private static final Font FONT_BODY = new Font("Segoe UI", Font.PLAIN, 13);
+    private static final Font FONT_HEADING = new Font("Segoe UI", Font.BOLD, 28);
+    private static final Font FONT_TITLE = new Font("Segoe UI", Font.BOLD, 14);
 
     private final Path projectRoot;
     private final Path inputDir;
@@ -27,6 +41,10 @@ public class SentimentAnalysisApp {
     private JList<Path> inputList;
     private JList<Path> outputList;
     private JTextArea logArea;
+    private JButton refreshButton;
+    private JButton addInputButton;
+    private JButton removeInputButton;
+    private JButton removeOutputButton;
     private JButton runSingleButton;
     private JButton runBatchButton;
     private JButton selectAllInputsButton;
@@ -56,24 +74,11 @@ public class SentimentAnalysisApp {
     private void showUI() {
         appFrame = new JFrame("Senate Hearing Sentiment Analysis");
         appFrame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
-        appFrame.setLayout(new BorderLayout(10, 10));
+        appFrame.setLayout(new BorderLayout());
+        appFrame.getContentPane().setBackground(COLOR_BG);
 
-        JPanel topPanel = new JPanel(new BorderLayout(10, 10));
-        topPanel.add(buildFilePanel(), BorderLayout.CENTER);
-        topPanel.add(buildActionPanel(), BorderLayout.EAST);
-
-        JPanel bottomPanel = new JPanel(new BorderLayout(10, 10));
-        bottomPanel.setBorder(BorderFactory.createEmptyBorder(0, 10, 10, 10));
-        bottomPanel.add(buildDbSummaryPanel(), BorderLayout.NORTH);
-
-        logArea = new JTextArea(12, 80);
-        logArea.setEditable(false);
-        logArea.setLineWrap(true);
-        logArea.setWrapStyleWord(true);
-        bottomPanel.add(new JScrollPane(logArea), BorderLayout.CENTER);
-
-        appFrame.add(topPanel, BorderLayout.CENTER);
-        appFrame.add(bottomPanel, BorderLayout.SOUTH);
+        appFrame.add(buildTaskBarPanel(), BorderLayout.WEST);
+        appFrame.add(buildMainContentPanel(), BorderLayout.CENTER);
 
         refreshLists();
         appendLog("App ready.");
@@ -81,9 +86,70 @@ public class SentimentAnalysisApp {
         appendLog("Input dir: " + inputDir);
         appendLog("Output dir: " + outputDir);
 
-        appFrame.pack();
+        appFrame.setMinimumSize(new Dimension(1100, 720));
+        appFrame.setSize(1360, 840);
         appFrame.setLocationRelativeTo(null);
         appFrame.setVisible(true);
+    }
+
+    private JPanel buildMainContentPanel() {
+        JPanel panel = new JPanel(new BorderLayout(14, 14));
+        panel.setBackground(COLOR_BG);
+        panel.setBorder(BorderFactory.createEmptyBorder(20, 20, 20, 20));
+
+        panel.add(buildHeaderPanel(), BorderLayout.NORTH);
+
+        JSplitPane splitPane = new JSplitPane(
+            JSplitPane.VERTICAL_SPLIT,
+            buildFilePanel(),
+            buildStatusPanel()
+        );
+        splitPane.setBorder(null);
+        splitPane.setResizeWeight(0.54);
+        splitPane.setBackground(COLOR_BG);
+        splitPane.setContinuousLayout(true);
+        panel.add(splitPane, BorderLayout.CENTER);
+
+        return panel;
+    }
+
+    private JPanel buildHeaderPanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(COLOR_BG);
+
+        JLabel title = new JLabel("Sentiment Analysis Workspace");
+        title.setFont(FONT_HEADING);
+        title.setForeground(Color.WHITE);
+
+        JLabel subtitle = new JLabel("Run transcript scoring, review outputs, and track persistence activity.");
+        subtitle.setFont(new Font("Segoe UI", Font.PLAIN, 14));
+        subtitle.setForeground(COLOR_TEXT_SUBTLE);
+
+        panel.add(title);
+        panel.add(Box.createVerticalStrut(4));
+        panel.add(subtitle);
+
+        return panel;
+    }
+
+    private JPanel buildStatusPanel() {
+        JPanel panel = new JPanel(new BorderLayout(12, 12));
+        panel.setBackground(COLOR_BG);
+        panel.add(buildDbSummaryPanel(), BorderLayout.NORTH);
+
+        logArea = new JTextArea(12, 80);
+        logArea.setEditable(false);
+        logArea.setLineWrap(true);
+        logArea.setWrapStyleWord(true);
+        logArea.setFont(FONT_BODY);
+        logArea.setBackground(COLOR_SURFACE_ALT);
+        logArea.setForeground(COLOR_TEXT);
+        logArea.setCaretColor(COLOR_TEXT);
+        logArea.setBorder(BorderFactory.createEmptyBorder(8, 10, 8, 10));
+
+        panel.add(wrapWithLabel("Activity Log", createStyledScrollPane(logArea)), BorderLayout.CENTER);
+        return panel;
     }
 
     private Path resolveProjectRoot() {
@@ -117,8 +183,8 @@ public class SentimentAnalysisApp {
         inputList = new JList<>(inputModel);
         outputList = new JList<>(outputModel);
 
-        inputList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
-        outputList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        styleList(inputList, ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        styleList(outputList, ListSelectionModel.SINGLE_SELECTION);
         inputList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) {
                 updateSelectionSummary();
@@ -128,120 +194,271 @@ public class SentimentAnalysisApp {
         inputList.setCellRenderer(new FileNameRenderer());
         outputList.setCellRenderer(new FileNameRenderer());
 
-        JPanel panel = new JPanel(new GridLayout(1, 2, 10, 10));
-        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        JPanel panel = new JPanel(new GridLayout(1, 2, 12, 12));
+        panel.setBackground(COLOR_BG);
 
-        panel.add(wrapWithLabel("Input Files", new JScrollPane(inputList)));
-        panel.add(wrapWithLabel("Output Files", new JScrollPane(outputList)));
+        panel.add(wrapWithLabel("Input Files", createStyledScrollPane(inputList)));
+        panel.add(wrapWithLabel("Output Files", createStyledScrollPane(outputList)));
 
         return panel;
     }
 
-    private JPanel buildActionPanel() {
+    private JPanel buildTaskBarPanel() {
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-        panel.setBorder(BorderFactory.createEmptyBorder(10, 0, 10, 10));
+        panel.setBackground(COLOR_SURFACE);
+        panel.setBorder(BorderFactory.createMatteBorder(0, 0, 0, 1, COLOR_BORDER));
+        panel.setPreferredSize(new Dimension(300, 0));
 
-        JButton refreshButton = new JButton("Refresh");
-        JButton addInputButton = new JButton("Add Input File");
-        JButton removeInputButton = new JButton("Remove Input File");
-        JButton removeOutputButton = new JButton("Remove Output File");
-        runSingleButton = new JButton("Run Selected (Single)");
-        runBatchButton = new JButton("Run Selected (Batch)");
-        selectAllInputsButton = new JButton("Select All Inputs");
-        clearSelectionButton = new JButton("Clear Selection");
-        batchWorkersSpinner = new JSpinner(new SpinnerNumberModel(2, 1, 4, 1));
-        dbPersistCheckBox = new JCheckBox("Persist To Database", true);
-        previewBeforeCommitCheckBox = new JCheckBox("Preview Before Save (Single)", true);
+        JLabel logo = new JLabel("Senate Hearing Analyzer");
+        logo.setForeground(Color.WHITE);
+        logo.setFont(new Font("Segoe UI", Font.BOLD, 18));
+        logo.setBorder(BorderFactory.createEmptyBorder(24, 20, 20, 20));
+        logo.setAlignmentX(Component.LEFT_ALIGNMENT);
+        panel.add(logo);
 
-        refreshButton.addActionListener(e -> refreshLists());
-        addInputButton.addActionListener(e -> addInputFile());
-        removeInputButton.addActionListener(e -> removeSelectedFile(inputList, "input"));
-        removeOutputButton.addActionListener(e -> removeSelectedFile(outputList, "output"));
-        selectAllInputsButton.addActionListener(e -> selectAllInputs());
-        clearSelectionButton.addActionListener(e -> {
+        JPanel fileTaskGroup = createTaskGroupPanel();
+        fileTaskGroup.add(createTaskGroupLabel("File Tasks"));
+        fileTaskGroup.add(Box.createVerticalStrut(10));
+
+        refreshButton = createTaskButton("Refresh Lists", false, this::refreshLists);
+        addInputButton = createTaskButton("Add Input File", false, this::addInputFile);
+        removeInputButton = createTaskButton("Remove Input File", false,
+            () -> removeSelectedFile(inputList, "input"));
+        removeOutputButton = createTaskButton("Remove Output File", false,
+            () -> removeSelectedFile(outputList, "output"));
+        selectAllInputsButton = createTaskButton("Select All Inputs", false, this::selectAllInputs);
+        clearSelectionButton = createTaskButton("Clear Selection", false, () -> {
             inputList.clearSelection();
             updateSelectionSummary();
         });
-        runSingleButton.addActionListener(e -> runSingleAnalysis());
-        runBatchButton.addActionListener(e -> runBatchAnalysis());
 
-        panel.add(refreshButton);
-        panel.add(Box.createVerticalStrut(8));
-        panel.add(addInputButton);
-        panel.add(Box.createVerticalStrut(8));
-        panel.add(removeInputButton);
-        panel.add(Box.createVerticalStrut(8));
-        panel.add(removeOutputButton);
-        panel.add(Box.createVerticalStrut(12));
-        panel.add(selectAllInputsButton);
-        panel.add(Box.createVerticalStrut(8));
-        panel.add(clearSelectionButton);
-        panel.add(Box.createVerticalStrut(14));
-        panel.add(new JLabel("Batch Workers (1-4):"));
-        panel.add(Box.createVerticalStrut(4));
-        panel.add(batchWorkersSpinner);
-        panel.add(Box.createVerticalStrut(12));
-        panel.add(previewBeforeCommitCheckBox);
-        panel.add(Box.createVerticalStrut(8));
-        panel.add(dbPersistCheckBox);
-        panel.add(Box.createVerticalStrut(8));
-        panel.add(runSingleButton);
-        panel.add(Box.createVerticalStrut(8));
-        panel.add(runBatchButton);
+        fileTaskGroup.add(refreshButton);
+        fileTaskGroup.add(Box.createVerticalStrut(8));
+        fileTaskGroup.add(addInputButton);
+        fileTaskGroup.add(Box.createVerticalStrut(8));
+        fileTaskGroup.add(removeInputButton);
+        fileTaskGroup.add(Box.createVerticalStrut(8));
+        fileTaskGroup.add(removeOutputButton);
+        fileTaskGroup.add(Box.createVerticalStrut(8));
+        fileTaskGroup.add(selectAllInputsButton);
+        fileTaskGroup.add(Box.createVerticalStrut(8));
+        fileTaskGroup.add(clearSelectionButton);
+
+        JPanel runOptionsGroup = createTaskGroupPanel();
+        runOptionsGroup.add(createTaskGroupLabel("Run Options"));
+        runOptionsGroup.add(Box.createVerticalStrut(10));
+
+        batchWorkersSpinner = new JSpinner(new SpinnerNumberModel(2, 1, 4, 1));
+        styleSpinner(batchWorkersSpinner);
+
+        JLabel workersLabel = new JLabel("Batch Workers (1-4)");
+        workersLabel.setForeground(COLOR_TEXT_MUTED);
+        workersLabel.setFont(FONT_BODY);
+        workersLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        previewBeforeCommitCheckBox = createTaskCheckBox("Preview Before Save (Single)", true);
+        dbPersistCheckBox = createTaskCheckBox("Persist To Database", true);
+
+        runOptionsGroup.add(workersLabel);
+        runOptionsGroup.add(Box.createVerticalStrut(4));
+        runOptionsGroup.add(batchWorkersSpinner);
+        runOptionsGroup.add(Box.createVerticalStrut(10));
+        runOptionsGroup.add(previewBeforeCommitCheckBox);
+        runOptionsGroup.add(Box.createVerticalStrut(6));
+        runOptionsGroup.add(dbPersistCheckBox);
+
+        JPanel runTaskGroup = createTaskGroupPanel();
+        runTaskGroup.add(createTaskGroupLabel("Analysis Tasks"));
+        runTaskGroup.add(Box.createVerticalStrut(10));
+
+        runSingleButton = createTaskButton("Run Selected (Single)", true, this::runSingleAnalysis);
+        runBatchButton = createTaskButton("Run Selected (Batch)", true, this::runBatchAnalysis);
+
+        runTaskGroup.add(runSingleButton);
+        runTaskGroup.add(Box.createVerticalStrut(8));
+        runTaskGroup.add(runBatchButton);
+
+        panel.add(fileTaskGroup);
+        panel.add(Box.createVerticalStrut(10));
+        panel.add(runOptionsGroup);
         panel.add(Box.createVerticalGlue());
+        panel.add(runTaskGroup);
+        panel.add(Box.createVerticalStrut(20));
 
         return panel;
     }
 
+    private JPanel createTaskGroupPanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setOpaque(false);
+        panel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        panel.setBorder(BorderFactory.createEmptyBorder(0, 16, 0, 16));
+        return panel;
+    }
+
+    private JLabel createTaskGroupLabel(String text) {
+        JLabel label = new JLabel(text);
+        label.setForeground(COLOR_TEXT_MUTED);
+        label.setFont(new Font("Segoe UI", Font.BOLD, 12));
+        label.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return label;
+    }
+
+    private JButton createTaskButton(String text, boolean accent, Runnable action) {
+        JButton button = new JButton(text);
+        button.setAlignmentX(Component.LEFT_ALIGNMENT);
+        button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 38));
+        button.setHorizontalAlignment(SwingConstants.LEFT);
+        button.setFocusPainted(false);
+        button.setOpaque(true);
+        button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        button.setFont(FONT_BODY);
+
+        Color baseColor = accent ? COLOR_ACCENT : COLOR_SURFACE_ALT;
+        Color hoverColor = accent ? COLOR_ACCENT_HOVER : new Color(0x1F1F1F);
+        button.setBackground(baseColor);
+        button.setForeground(Color.WHITE);
+        button.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(accent ? COLOR_ACCENT : COLOR_BORDER),
+            BorderFactory.createEmptyBorder(8, 12, 8, 12)
+        ));
+        button.addActionListener(e -> action.run());
+        button.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                if (button.isEnabled()) {
+                    button.setBackground(hoverColor);
+                }
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e) {
+                if (button.isEnabled()) {
+                    button.setBackground(baseColor);
+                }
+            }
+        });
+
+        return button;
+    }
+
+    private JCheckBox createTaskCheckBox(String text, boolean selected) {
+        JCheckBox checkBox = new JCheckBox(text, selected);
+        checkBox.setOpaque(false);
+        checkBox.setForeground(COLOR_TEXT_MUTED);
+        checkBox.setFont(FONT_BODY);
+        checkBox.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return checkBox;
+    }
+
+    private void styleSpinner(JSpinner spinner) {
+        spinner.setAlignmentX(Component.LEFT_ALIGNMENT);
+        spinner.setMaximumSize(new Dimension(100, 32));
+        spinner.setFont(FONT_BODY);
+        spinner.setBorder(BorderFactory.createLineBorder(COLOR_BORDER));
+
+        JComponent editor = spinner.getEditor();
+        if (editor instanceof JSpinner.DefaultEditor) {
+            JTextField field = ((JSpinner.DefaultEditor) editor).getTextField();
+            field.setBackground(COLOR_SURFACE_ALT);
+            field.setForeground(COLOR_TEXT);
+            field.setCaretColor(COLOR_TEXT);
+            field.setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
+        }
+    }
+
+    private void styleList(JList<Path> list, int selectionMode) {
+        list.setSelectionMode(selectionMode);
+        list.setBackground(COLOR_SURFACE_ALT);
+        list.setForeground(COLOR_TEXT);
+        list.setSelectionBackground(COLOR_ACCENT);
+        list.setSelectionForeground(Color.WHITE);
+        list.setFont(FONT_BODY);
+        list.setFixedCellHeight(28);
+        list.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+    }
+
+    private JScrollPane createStyledScrollPane(JComponent child) {
+        JScrollPane scrollPane = new JScrollPane(child);
+        scrollPane.setBorder(BorderFactory.createLineBorder(COLOR_BORDER));
+        scrollPane.getViewport().setBackground(COLOR_SURFACE_ALT);
+        scrollPane.setBackground(COLOR_SURFACE_ALT);
+        return scrollPane;
+    }
+
     private JPanel wrapWithLabel(String label, JComponent child) {
-        JPanel panel = new JPanel(new BorderLayout(5, 5));
-        panel.add(new JLabel(label), BorderLayout.NORTH);
+        JPanel panel = new JPanel(new BorderLayout(8, 8));
+        panel.setBackground(COLOR_SURFACE);
+        panel.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(COLOR_BORDER),
+            BorderFactory.createEmptyBorder(12, 12, 12, 12)
+        ));
+
+        JLabel titleLabel = new JLabel(label);
+        titleLabel.setForeground(Color.WHITE);
+        titleLabel.setFont(FONT_TITLE);
+
+        panel.add(titleLabel, BorderLayout.NORTH);
         panel.add(child, BorderLayout.CENTER);
         return panel;
     }
 
     private JPanel buildDbSummaryPanel() {
-        JPanel panel = new JPanel(new GridLayout(3, 6, 8, 4));
-        panel.setBorder(BorderFactory.createTitledBorder("Last DB Run Summary"));
+        JPanel panel = new JPanel(new BorderLayout(8, 8));
+        panel.setBackground(COLOR_BG);
 
-        panel.add(new JLabel("Selected Input Files:"));
-        panel.add(new JLabel(""));
-        panel.add(new JLabel(""));
-        panel.add(new JLabel(""));
-        panel.add(new JLabel(""));
-        panel.add(new JLabel(""));
+        JLabel heading = new JLabel("Last DB Run Summary");
+        heading.setForeground(Color.WHITE);
+        heading.setFont(FONT_TITLE);
+        panel.add(heading, BorderLayout.NORTH);
 
-        selectionSummaryValue = new JLabel("0 selected");
-        panel.add(selectionSummaryValue);
-        panel.add(new JLabel(""));
-        panel.add(new JLabel(""));
-        panel.add(new JLabel(""));
-        panel.add(new JLabel(""));
-        panel.add(new JLabel(""));
+        JPanel statsGrid = new JPanel(new GridLayout(1, 7, 8, 8));
+        statsGrid.setBackground(COLOR_BG);
 
-        panel.add(new JLabel("Status:"));
-        panel.add(new JLabel("Hearing ID:"));
-        panel.add(new JLabel("Run ID:"));
-        panel.add(new JLabel("Turns Inserted:"));
-        panel.add(new JLabel("Scores Inserted:"));
-        panel.add(new JLabel("Replaced Prior Run:"));
+        selectionSummaryValue = createSummaryValueLabel("0 selected");
+        dbStatusValue = createSummaryValueLabel("N/A");
+        dbHearingValue = createSummaryValueLabel("-");
+        dbRunValue = createSummaryValueLabel("-");
+        dbTurnsValue = createSummaryValueLabel("-");
+        dbScoresValue = createSummaryValueLabel("-");
+        dbReplaceValue = createSummaryValueLabel("-");
 
-        dbStatusValue = new JLabel("N/A");
-        dbHearingValue = new JLabel("-");
-        dbRunValue = new JLabel("-");
-        dbTurnsValue = new JLabel("-");
-        dbScoresValue = new JLabel("-");
-        dbReplaceValue = new JLabel("-");
+        statsGrid.add(createSummaryCard("Selected Inputs", selectionSummaryValue));
+        statsGrid.add(createSummaryCard("Status", dbStatusValue));
+        statsGrid.add(createSummaryCard("Hearing ID", dbHearingValue));
+        statsGrid.add(createSummaryCard("Run ID", dbRunValue));
+        statsGrid.add(createSummaryCard("Turns Inserted", dbTurnsValue));
+        statsGrid.add(createSummaryCard("Scores Inserted", dbScoresValue));
+        statsGrid.add(createSummaryCard("Replaced Prior Run", dbReplaceValue));
 
-        panel.add(dbStatusValue);
-        panel.add(dbHearingValue);
-        panel.add(dbRunValue);
-        panel.add(dbTurnsValue);
-        panel.add(dbScoresValue);
-        panel.add(dbReplaceValue);
-
+        panel.add(statsGrid, BorderLayout.CENTER);
         return panel;
+    }
+
+    private JLabel createSummaryValueLabel(String text) {
+        JLabel label = new JLabel(text);
+        label.setForeground(Color.WHITE);
+        label.setFont(new Font("Segoe UI", Font.BOLD, 16));
+        return label;
+    }
+
+    private JPanel createSummaryCard(String title, JLabel valueLabel) {
+        JPanel card = new JPanel(new BorderLayout(2, 6));
+        card.setBackground(COLOR_SURFACE);
+        card.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(COLOR_BORDER),
+            BorderFactory.createEmptyBorder(8, 10, 8, 10)
+        ));
+
+        JLabel titleLabel = new JLabel(title);
+        titleLabel.setForeground(COLOR_TEXT_MUTED);
+        titleLabel.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+
+        card.add(titleLabel, BorderLayout.NORTH);
+        card.add(valueLabel, BorderLayout.CENTER);
+        return card;
     }
 
     private void refreshLists() {
@@ -357,6 +574,10 @@ public class SentimentAnalysisApp {
     }
 
     private void addInputFileControlsEnabled(boolean enabled) {
+        refreshButton.setEnabled(enabled);
+        addInputButton.setEnabled(enabled);
+        removeInputButton.setEnabled(enabled);
+        removeOutputButton.setEnabled(enabled);
         selectAllInputsButton.setEnabled(enabled);
         clearSelectionButton.setEnabled(enabled);
     }
@@ -653,6 +874,16 @@ public class SentimentAnalysisApp {
             );
             if (value instanceof Path) {
                 label.setText(((Path) value).getFileName().toString());
+            }
+            label.setFont(FONT_BODY);
+            label.setOpaque(true);
+            label.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
+            if (isSelected) {
+                label.setBackground(COLOR_ACCENT);
+                label.setForeground(Color.WHITE);
+            } else {
+                label.setBackground(COLOR_SURFACE_ALT);
+                label.setForeground(COLOR_TEXT);
             }
             return label;
         }
