@@ -47,7 +47,7 @@ public class SpeakerTurnParser {
      * form is tried first.
      */
     private static final Pattern SPEAKER_LINE = Pattern.compile(
-        "^\\s{2,}(The Chairman|Chairman|Senator|Mr\\.|Ms\\.|Mrs\\.|Judge|General)" +
+        "^\\s{2,}(Ranking Member|Vice Chairman|The Chairman|Chairman|Senator|Mr\\.|Ms\\.|Mrs\\.|Judge|General)" +
         "\\s+([A-Za-z][A-Za-z'\\-]*(?:\\s+[A-Za-z][A-Za-z'\\-]*)*)\\.\\s*(.*)$"
     );
 

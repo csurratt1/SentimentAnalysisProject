@@ -40,7 +40,7 @@ public class ScoringPersistence {
     }
 
     private static final Set<String> SENATOR_TITLES = Set.of(
-        "Chairman", "The Chairman", "Senator"
+        "Chairman", "The Chairman", "Senator", "Ranking Member", "Vice Chairman"
     );
 
     private static final Set<String> NOMINEE_TITLES = Set.of(
@@ -438,6 +438,7 @@ public class ScoringPersistence {
                 targetNominationId,
                 rt.getMethod().toString(),
                 rt.getConfidence(),
+                st.getAvgSentimentConfidence(),
                 st.getSentenceCount(),
                 st.getTotalScore(),
                 st.getAvgScore(),

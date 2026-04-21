@@ -90,6 +90,7 @@ public class TurnScorer {
         private final List<ResolvedTarget> resolved;
         private final List<ScoredTurn> scored;
         private final Map<String, InteractionScore> interactions;
+        private final SpeakerAliasResolver.AliasMap aliases;
         private final long elapsedMs;
 
         public AnalysisBundle(String inputFile,
@@ -97,12 +98,14 @@ public class TurnScorer {
                               List<ResolvedTarget> resolved,
                               List<ScoredTurn> scored,
                               Map<String, InteractionScore> interactions,
+                              SpeakerAliasResolver.AliasMap aliases,
                               long elapsedMs) {
             this.inputFile = inputFile;
             this.lines = lines;
             this.resolved = resolved;
             this.scored = scored;
             this.interactions = interactions;
+            this.aliases = aliases;
             this.elapsedMs = elapsedMs;
         }
 
@@ -111,6 +114,7 @@ public class TurnScorer {
         public List<ResolvedTarget> getResolved() { return resolved; }
         public List<ScoredTurn> getScored() { return scored; }
         public Map<String, InteractionScore> getInteractions() { return interactions; }
+        public SpeakerAliasResolver.AliasMap getAliases() { return aliases; }
         public long getElapsedMs() { return elapsedMs; }
     }
 
@@ -128,21 +132,48 @@ public class TurnScorer {
     // ── Known senator titles (for filtering approval-relevant turns) ─────
 
     private static final Set<String> SENATOR_TITLES = Set.of(
-        "Chairman", "The Chairman", "Senator"
+        "Chairman", "The Chairman", "Senator", "Ranking Member", "Vice Chairman"
     );
+
+    // ── Cached CoreNLP pipeline (built once, reused across all runs) ──────
+
+    private static volatile StanfordCoreNLP scoringPipeline;
+    private static final Object PIPELINE_LOCK = new Object();
+
+    private static StanfordCoreNLP getScoringPipeline() {
+        if (scoringPipeline == null) {
+            synchronized (PIPELINE_LOCK) {
+                if (scoringPipeline == null) {
+                    Properties props = new Properties();
+                    props.setProperty("annotators", "tokenize,ssplit,pos,parse,sentiment");
+                    props.setProperty("parse.model",
+                        "edu/stanford/nlp/models/srparser/englishSR.beam.ser.gz");
+                    scoringPipeline = new StanfordCoreNLP(props);
+                }
+            }
+        }
+        return scoringPipeline;
+    }
 
     // ── Data structures for aggregation ──────────────────────────────────
 
     /**
      * Holds aggregated scores for one (senator, nominee) interaction pair.
+     * Tracks resolution confidence, NLP sentiment confidence, resolution
+     * method breakdown, and original speaker labels (before alias merging)
+     * so that all of this can be surfaced in reports and JSON output.
      */
     static class InteractionScore {
-        String senatorLabel;
+        String senatorLabel;     // canonical label after alias merging
         String nomineeLabel;
         int    turns;
         int    sentences;
-        double totalWeighted;   // sum of weighted scores across turns
-        double totalRaw;        // sum of raw avg scores across turns
+        double totalWeighted;
+        double totalRaw;
+        double totalResolutionConf;
+        double totalSentimentConf;
+        final Map<String, Integer> methodCounts      = new LinkedHashMap<>();
+        final Map<String, Integer> aliasLabelCounts  = new LinkedHashMap<>();
 
         InteractionScore(String senator, String nominee) {
             this.senatorLabel = senator;
@@ -151,13 +182,34 @@ public class TurnScorer {
 
         void addTurn(ScoredTurn st) {
             turns++;
-            sentences += st.getSentenceCount();
-            totalWeighted += st.getWeightedScore();
-            totalRaw      += st.getAvgScore();
+            sentences           += st.getSentenceCount();
+            totalWeighted       += st.getWeightedScore();
+            totalRaw            += st.getAvgScore();
+            totalResolutionConf += st.getTarget().getConfidence();
+            totalSentimentConf  += st.getAvgSentimentConfidence();
+            methodCounts.merge(st.getTarget().getMethod().toString(), 1, Integer::sum);
+            // Track original (pre-alias) label so aliases can be reported
+            aliasLabelCounts.merge(st.getSpeakerLabel(), 1, Integer::sum);
         }
 
-        double avgWeighted() { return turns > 0 ? totalWeighted / turns : 0.0; }
-        double avgRaw()      { return turns > 0 ? totalRaw / turns : 0.0; }
+        double avgWeighted()       { return turns > 0 ? totalWeighted / turns : 0.0; }
+        double avgRaw()            { return turns > 0 ? totalRaw / turns : 0.0; }
+        double avgResolutionConf() { return turns > 0 ? totalResolutionConf / turns : 0.0; }
+        double avgSentimentConf()  { return turns > 0 ? totalSentimentConf / turns : 0.0; }
+
+        String reliabilityTier() {
+            double r = avgResolutionConf();
+            return r >= 0.85 ? "HIGH" : r >= 0.65 ? "MED" : "LOW";
+        }
+
+        /** Returns alias labels (non-canonical) that contributed turns to this interaction. */
+        List<String> mergedAliasLabels() {
+            List<String> aliases = new ArrayList<>();
+            for (String label : aliasLabelCounts.keySet()) {
+                if (!label.equals(senatorLabel)) aliases.add(label);
+            }
+            return aliases;
+        }
     }
 
     // ── Core scoring method ──────────────────────────────────────────────
@@ -219,18 +271,21 @@ public class TurnScorer {
 
     /**
      * Aggregates scored turns by (senator, nominee) pairs.
+     * Applies the alias map so that "Ranking Member Sessions" and
+     * "Senator Sessions" are counted as a single senator entry.
      */
-    static Map<String, InteractionScore> aggregate(List<ScoredTurn> scored) {
-        // Key: "senatorLabel|nomineeLabel"
+    static Map<String, InteractionScore> aggregate(List<ScoredTurn> scored,
+                                                   SpeakerAliasResolver.AliasMap aliases) {
         Map<String, InteractionScore> map = new LinkedHashMap<>();
 
         for (ScoredTurn st : scored) {
-            if (st.isSelfTurn()) continue;       // nominee's own speech
-            if (!st.hasSpecificTarget()) continue; // ambiguous target
+            if (st.isSelfTurn()) continue;
+            if (!st.hasSpecificTarget()) continue;
 
-            String senator = st.getSpeakerLabel();
-            String nominee = st.getTarget().getNominee().getDisplayName();
-            String key = senator + "|" + nominee;
+            String rawLabel = st.getSpeakerLabel();
+            String senator  = aliases != null ? aliases.canonicalize(rawLabel) : rawLabel;
+            String nominee  = st.getTarget().getNominee().getDisplayName();
+            String key      = senator + "|" + nominee;
 
             map.computeIfAbsent(key, k -> new InteractionScore(senator, nominee))
                .addTurn(st);
@@ -239,9 +294,17 @@ public class TurnScorer {
         return map;
     }
 
+    /** Maps a weighted/avg score to a human-readable interpretation band. */
+    static String interpretScore(double score) {
+        if (score <= -1.00) return "Strongly opposing";
+        if (score <= -0.25) return "Mildly opposing";
+        if (score <   0.25) return "Neutral or mixed";
+        if (score <   1.00) return "Mildly supportive";
+        return "Strongly supportive";
+    }
+
     /**
-     * Prints the Nominee Scorecard: for each nominee, which senators
-     * questioned them and what the approval sentiment was.
+     * Prints the Nominee Scorecard with per-senator reliability tiers.
      */
     static void printNomineeScorecard(PrintStream out,
                                       Map<String, InteractionScore> interactions,
@@ -251,20 +314,15 @@ public class TurnScorer {
         out.println("=".repeat(70));
         out.println();
 
-        // Group interactions by nominee
         Map<String, List<InteractionScore>> byNominee = new LinkedHashMap<>();
         for (InteractionScore is : interactions.values()) {
-            byNominee.computeIfAbsent(is.nomineeLabel, k -> new ArrayList<>())
-                     .add(is);
+            byNominee.computeIfAbsent(is.nomineeLabel, k -> new ArrayList<>()).add(is);
         }
 
         for (Map.Entry<String, List<InteractionScore>> entry : byNominee.entrySet()) {
-            String nominee = entry.getKey();
             List<InteractionScore> senators = entry.getValue();
 
-            // Compute overall nominee approval
-            int totalTurns = 0;
-            int totalSentences = 0;
+            int    totalTurns = 0, totalSentences = 0;
             double totalWeighted = 0;
             for (InteractionScore is : senators) {
                 totalTurns     += is.turns;
@@ -273,26 +331,26 @@ public class TurnScorer {
             }
             double overallAvg = totalTurns > 0 ? totalWeighted / totalTurns : 0.0;
 
-            out.printf("  %s%n", nominee);
+            out.printf("  %s%n", entry.getKey());
             out.println("  " + "-".repeat(66));
-            out.printf("  Overall Approval Score: %+.2f  (%d sentences from %d senator turns)%n",
-                overallAvg, totalSentences, totalTurns);
+            out.printf("  Overall Approval Score: %+.2f  [%s]  (%d sentences from %d senator turns)%n",
+                overallAvg, interpretScore(overallAvg), totalSentences, totalTurns);
             out.println();
 
-            // Sort senators by weighted score (most negative first)
             senators.sort(Comparator.comparingDouble(InteractionScore::avgWeighted));
-
             for (InteractionScore is : senators) {
-                out.printf("    %-28s %+.2f  (%d turns, %d sentences)%n",
-                    is.senatorLabel, is.avgWeighted(), is.turns, is.sentences);
+                out.printf("    %-28s %+.2f  [%-20s]  ● %-4s  (%d turns)%n",
+                    is.senatorLabel, is.avgWeighted(),
+                    interpretScore(is.avgWeighted()),
+                    is.reliabilityTier(), is.turns);
             }
             out.println();
         }
     }
 
     /**
-     * Prints the Senator Voting Profile: for each senator, their scores
-     * toward each nominee they questioned.
+     * Prints the Senator Voting Profile with inline confidence breakdown,
+     * resolution method distribution, and alias merge notices.
      */
     static void printSenatorProfile(PrintStream out,
                                     Map<String, InteractionScore> interactions) {
@@ -301,26 +359,92 @@ public class TurnScorer {
         out.println("=".repeat(70));
         out.println();
 
-        // Group interactions by senator
         Map<String, List<InteractionScore>> bySenator = new LinkedHashMap<>();
         for (InteractionScore is : interactions.values()) {
-            bySenator.computeIfAbsent(is.senatorLabel, k -> new ArrayList<>())
-                     .add(is);
+            bySenator.computeIfAbsent(is.senatorLabel, k -> new ArrayList<>()).add(is);
         }
 
         for (Map.Entry<String, List<InteractionScore>> entry : bySenator.entrySet()) {
             String senator = entry.getKey();
             List<InteractionScore> nominees = entry.getValue();
 
-            out.printf("  %s%n", senator);
+            // Collect alias info across all this senator's interactions
+            Map<String, Integer> allAliases = new LinkedHashMap<>();
+            for (InteractionScore is : nominees) {
+                for (String alias : is.mergedAliasLabels()) {
+                    allAliases.merge(alias,
+                        is.aliasLabelCounts.getOrDefault(alias, 0), Integer::sum);
+                }
+            }
+
+            if (allAliases.isEmpty()) {
+                out.printf("  %s%n", senator);
+            } else {
+                StringBuilder aliasNote = new StringBuilder();
+                allAliases.forEach((alias, cnt) ->
+                    aliasNote.append(alias).append(" (").append(cnt).append(" turns), "));
+                String note = aliasNote.toString().replaceAll(", $", "");
+                out.printf("  %s  [merged: %s]%n", senator, note);
+            }
             out.println("  " + "-".repeat(66));
 
-            // Sort nominees by weighted score (most negative first)
             nominees.sort(Comparator.comparingDouble(InteractionScore::avgWeighted));
-
             for (InteractionScore is : nominees) {
-                out.printf("    → %-24s %+.2f  (%d turns, %d sentences)%n",
-                    is.nomineeLabel, is.avgWeighted(), is.turns, is.sentences);
+                out.printf("    → %-22s  %+.2f  [%-20s]  ● %s%n",
+                    is.nomineeLabel, is.avgWeighted(),
+                    interpretScore(is.avgWeighted()),
+                    is.reliabilityTier());
+                out.printf("      Confidence: res=%.2f  nlp=%.2f  |  %d turns · %d sentences%n",
+                    is.avgResolutionConf(), is.avgSentimentConf(),
+                    is.turns, is.sentences);
+                // Method breakdown
+                if (!is.methodCounts.isEmpty()) {
+                    StringBuilder methods = new StringBuilder("      Methods: ");
+                    is.methodCounts.entrySet().stream()
+                        .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                        .forEach(e -> methods
+                            .append(e.getValue()).append("×")
+                            .append(friendlyMethod(e.getKey())).append("  "));
+                    out.println(methods.toString().stripTrailing());
+                }
+            }
+            out.println();
+        }
+    }
+
+    private static String friendlyMethod(String method) {
+        return switch (method) {
+            case "DIRECT_ADDRESS"  -> "direct";
+            case "RESPONSE_PAIR"   -> "response";
+            case "PRIOR_CONTEXT"   -> "context";
+            case "SECTION_DEFAULT" -> "section";
+            case "SELF"            -> "self";
+            default                -> method.toLowerCase(Locale.ROOT);
+        };
+    }
+
+    /**
+     * Prints a compact alias merge report when aliases were found.
+     */
+    static void printAliasReport(PrintStream out,
+                                 SpeakerAliasResolver.AliasMap aliases,
+                                 List<SpeakerTurn> turns) {
+        out.println("=".repeat(70));
+        out.println("  SPEAKER ALIAS MERGES");
+        out.println("=".repeat(70));
+        out.println();
+        out.println("  The following senator labels were merged into a single speaker.");
+        out.println("  All turns are counted under the canonical label.");
+        out.println();
+        for (String canonical : aliases.getAllCanonicals()) {
+            List<String> aliasLabels = aliases.getAliases(canonical);
+            if (aliasLabels.isEmpty()) continue;
+            int canonicalCount = (int) turns.stream()
+                .filter(t -> t.getSpeakerLabel().equals(canonical)).count();
+            out.printf("  %-30s  %d turns (canonical)%n", canonical, canonicalCount);
+            for (String alias : aliasLabels) {
+                int cnt = aliases.getAliasTurnCount(alias);
+                out.printf("    └─ %-28s  %d turns absorbed%n", alias, cnt);
             }
             out.println();
         }
@@ -463,6 +587,11 @@ public class TurnScorer {
             printNomineeScorecard(out, analysis.getInteractions(), analysis.getScored());
             printSenatorProfile(out, analysis.getInteractions());
             printSummary(out, analysis.getResolved(), analysis.getScored(), analysis.getInteractions(), analysis.getElapsedMs());
+            if (analysis.getAliases() != null && analysis.getAliases().hasAnyAliases()) {
+                List<SpeakerTurn> turns = new ArrayList<>();
+                for (ResolvedTarget rt : analysis.getResolved()) turns.add(rt.getTurn());
+                printAliasReport(out, analysis.getAliases(), turns);
+            }
         }
         return baos.toString(StandardCharsets.UTF_8);
     }
@@ -518,14 +647,26 @@ public class TurnScorer {
         // ── Build interaction-level array ──
         JsonArrayBuilder interArr = Json.createArrayBuilder();
         for (InteractionScore is : interactions.values()) {
+            JsonArrayBuilder aliasArr = Json.createArrayBuilder();
+            is.mergedAliasLabels().forEach(aliasArr::add);
+
+            JsonObjectBuilder methodBreakdown = Json.createObjectBuilder();
+            is.methodCounts.forEach(methodBreakdown::add);
+
             interArr.add(Json.createObjectBuilder()
-                .add("senator",          is.senatorLabel)
-                .add("nominee",          is.nomineeLabel)
-                .add("turns",            is.turns)
-                .add("sentences",        is.sentences)
-                .add("avgWeightedScore", round4(is.avgWeighted()))
-                .add("avgRawScore",      round4(is.avgRaw()))
-                .add("totalWeighted",    round4(is.totalWeighted))
+                .add("senator",                  is.senatorLabel)
+                .add("nominee",                  is.nomineeLabel)
+                .add("turns",                    is.turns)
+                .add("sentences",                is.sentences)
+                .add("avgWeightedScore",         round4(is.avgWeighted()))
+                .add("avgRawScore",              round4(is.avgRaw()))
+                .add("totalWeighted",            round4(is.totalWeighted))
+                .add("sentimentInterpretation",  interpretScore(is.avgWeighted()))
+                .add("avgResolutionConfidence",  round4(is.avgResolutionConf()))
+                .add("avgSentimentConfidence",   round4(is.avgSentimentConf()))
+                .add("reliabilityTier",          is.reliabilityTier())
+                .add("aliasesMerged",            aliasArr)
+                .add("resolutionMethodBreakdown", methodBreakdown)
             );
         }
 
@@ -550,21 +691,29 @@ public class TurnScorer {
             JsonArrayBuilder senArr = Json.createArrayBuilder();
             senators.sort(Comparator.comparingDouble(InteractionScore::avgWeighted));
             for (InteractionScore is : senators) {
+                JsonArrayBuilder aliasArr = Json.createArrayBuilder();
+                is.mergedAliasLabels().forEach(aliasArr::add);
                 senArr.add(Json.createObjectBuilder()
-                    .add("senator",  is.senatorLabel)
-                    .add("score",    round4(is.avgWeighted()))
-                    .add("turns",    is.turns)
-                    .add("sentences", is.sentences)
+                    .add("senator",               is.senatorLabel)
+                    .add("score",                 round4(is.avgWeighted()))
+                    .add("sentimentInterpretation", interpretScore(is.avgWeighted()))
+                    .add("reliabilityTier",       is.reliabilityTier())
+                    .add("avgResolutionConfidence", round4(is.avgResolutionConf()))
+                    .add("avgSentimentConfidence",  round4(is.avgSentimentConf()))
+                    .add("turns",                 is.turns)
+                    .add("sentences",             is.sentences)
+                    .add("aliasesMerged",         aliasArr)
                 );
             }
 
+            double overallApproval = totalTurns > 0 ? totalWeighted / totalTurns : 0.0;
             nomineesArr.add(Json.createObjectBuilder()
-                .add("nominee",         nominee)
-                .add("overallApproval", round4(totalTurns > 0
-                    ? totalWeighted / totalTurns : 0.0))
-                .add("totalTurns",      totalTurns)
-                .add("totalSentences",  totalSentences)
-                .add("senators",        senArr)
+                .add("nominee",                 nominee)
+                .add("overallApproval",         round4(overallApproval))
+                .add("sentimentInterpretation", interpretScore(overallApproval))
+                .add("totalTurns",              totalTurns)
+                .add("totalSentences",          totalSentences)
+                .add("senators",                senArr)
             );
         }
 
@@ -649,6 +798,7 @@ public class TurnScorer {
                                 List<ResolvedTarget> resolved,
                                 List<ScoredTurn> scored,
                                 Map<String, InteractionScore> interactions,
+                                SpeakerAliasResolver.AliasMap aliases,
                                 long elapsedMs) throws IOException {
         try (PrintStream out = new PrintStream(
                 Files.newOutputStream(txtPath), true, "UTF-8")) {
@@ -661,6 +811,11 @@ public class TurnScorer {
             printNomineeScorecard(out, interactions, scored);
             printSenatorProfile(out, interactions);
             printSummary(out, resolved, scored, interactions, elapsedMs);
+            if (aliases != null && aliases.hasAnyAliases()) {
+                List<SpeakerTurn> turns = new ArrayList<>();
+                for (ResolvedTarget rt : resolved) turns.add(rt.getTurn());
+                printAliasReport(out, aliases, turns);
+            }
         }
     }
 
@@ -724,24 +879,18 @@ public class TurnScorer {
             }
         }
 
-        // 5. Build CoreNLP pipeline (this is the slow step)
+        // 5. Get (or build on first run) the cached CoreNLP pipeline
+        boolean pipelineCached = scoringPipeline != null;
         if (printConsole) {
-            System.out.println("[3/4] Loading CoreNLP models...");
+            System.out.println(pipelineCached
+                ? "[3/4] CoreNLP pipeline ready (cached)."
+                : "[3/4] Loading CoreNLP models (first run — this takes ~60s)...");
         }
         long pipelineStart = System.currentTimeMillis();
-
-        Properties props = new Properties();
-        // SR parser needs POS tags as input features
-        props.setProperty("annotators", "tokenize,ssplit,pos,parse,sentiment");
-        // Use Shift-Reduce constituency parser (O(n) linear time)
-        // instead of default PCFG (O(n³)). Requires english extra models JAR.
-        props.setProperty("parse.model",
-            "edu/stanford/nlp/models/srparser/englishSR.beam.ser.gz");
-        StanfordCoreNLP pipeline = new StanfordCoreNLP(props);
-
-        long pipelineMs = System.currentTimeMillis() - pipelineStart;
-        if (printConsole) {
-            System.out.printf("       Pipeline ready (%.1f seconds)%n", pipelineMs / 1000.0);
+        StanfordCoreNLP pipeline = getScoringPipeline();
+        if (printConsole && !pipelineCached) {
+            System.out.printf("       Pipeline ready (%.1f seconds)%n",
+                (System.currentTimeMillis() - pipelineStart) / 1000.0);
         }
 
         // 6. Score each turn
@@ -786,8 +935,9 @@ public class TurnScorer {
             System.out.println();
         }
 
-        // 7. Aggregate
-        Map<String, InteractionScore> interactions = aggregate(scored);
+        // 7. Build alias map and aggregate
+        SpeakerAliasResolver.AliasMap aliases = SpeakerAliasResolver.resolve(turns);
+        Map<String, InteractionScore> interactions = aggregate(scored, aliases);
 
         // 8. Print to console
         if (printConsole) {
@@ -795,9 +945,12 @@ public class TurnScorer {
             printNomineeScorecard(System.out, interactions, scored);
             printSenatorProfile(System.out, interactions);
             printSummary(System.out, resolved, scored, interactions, totalMs);
+            if (aliases.hasAnyAliases()) {
+                printAliasReport(System.out, aliases, turns);
+            }
         }
 
-        return new AnalysisBundle(filePath, lines, resolved, scored, interactions, totalMs);
+        return new AnalysisBundle(filePath, lines, resolved, scored, interactions, aliases, totalMs);
     }
 
     private static String loadTranscriptText(String filePath) throws IOException {
@@ -877,7 +1030,7 @@ public class TurnScorer {
             writeJsonOutput(jsonWriteTarget, filePath, resolved, scored,
                             interactions, totalMs);
             writeTextReport(txtWriteTarget, verbose, resolved, scored,
-                            interactions, totalMs);
+                            interactions, analysis.getAliases(), totalMs);
         }
 
         // 10. Persist to database

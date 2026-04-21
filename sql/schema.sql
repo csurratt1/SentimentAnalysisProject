@@ -154,6 +154,7 @@ CREATE TABLE turn_scores (
     target_nomination_id    INT,
     resolution_method       ENUM('SELF','DIRECT_ADDRESS','RESPONSE_PAIR','PRIOR_CONTEXT','SECTION_DEFAULT','UNKNOWN') NOT NULL,
     confidence              DECIMAL(4,3),
+    avg_sentiment_confidence DECIMAL(4,3),
     sentence_count          INT,
     total_score             INT,
     avg_score               DECIMAL(6,4),
@@ -177,15 +178,23 @@ CREATE TABLE turn_scores (
 CREATE VIEW interactions_view AS
 SELECT
     ts.scoring_run_id,
-    s_speaker.last_name AS senator_last_name,
-    t.speaker_label AS senator_label,
-    s_nominee.last_name AS nominee_last_name,
+    s_speaker.last_name                    AS senator_last_name,
+    t.speaker_label                        AS senator_label,
+    s_nominee.last_name                    AS nominee_last_name,
     CONCAT(n.title_used, ' ', s_nominee.last_name) AS nominee_label,
-    COUNT(*) AS turns,
-    SUM(ts.sentence_count) AS sentences,
-    AVG(ts.weighted_score) AS avg_weighted_score,
-    AVG(ts.avg_score) AS avg_raw_score,
-    SUM(ts.weighted_score) AS total_weighted
+    COUNT(*)                               AS turns,
+    SUM(ts.sentence_count)                 AS sentences,
+    AVG(ts.weighted_score)                 AS avg_weighted_score,
+    AVG(ts.avg_score)                      AS avg_raw_score,
+    SUM(ts.weighted_score)                 AS total_weighted,
+    -- Confidence aggregates for historical reliability tracking
+    AVG(ts.confidence)                     AS avg_resolution_confidence,
+    AVG(ts.avg_sentiment_confidence)       AS avg_sentiment_confidence,
+    -- Resolution method distribution
+    SUM(ts.resolution_method = 'DIRECT_ADDRESS')  AS method_direct,
+    SUM(ts.resolution_method = 'RESPONSE_PAIR')   AS method_response,
+    SUM(ts.resolution_method = 'PRIOR_CONTEXT')   AS method_context,
+    SUM(ts.resolution_method = 'SECTION_DEFAULT') AS method_section
 FROM turn_scores ts
 JOIN turns t ON ts.turn_id = t.id
 JOIN speakers s_speaker ON t.speaker_id = s_speaker.id

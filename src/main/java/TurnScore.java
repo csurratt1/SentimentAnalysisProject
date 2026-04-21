@@ -14,6 +14,7 @@ public class TurnScore {
     private Integer targetNominationId;
     private String resolutionMethod;
     private Double confidence;
+    private Double avgSentimentConfidence;
     private Integer sentenceCount;
     private Integer totalScore;
     private Double avgScore;
@@ -24,7 +25,9 @@ public class TurnScore {
     }
 
     public TurnScore(int turnId, int scoringRunId, Integer targetNominationId,
-                     String resolutionMethod, Double confidence, Integer sentenceCount,
+                     String resolutionMethod, Double confidence,
+                     Double avgSentimentConfidence,
+                     Integer sentenceCount,
                      Integer totalScore, Double avgScore, Double weightedScore) {
         this.id = 0;
         this.turnId = turnId;
@@ -32,6 +35,7 @@ public class TurnScore {
         this.targetNominationId = targetNominationId;
         this.resolutionMethod = resolutionMethod;
         this.confidence = confidence;
+        this.avgSentimentConfidence = avgSentimentConfidence;
         this.sentenceCount = sentenceCount;
         this.totalScore = totalScore;
         this.avgScore = avgScore;
@@ -42,8 +46,8 @@ public class TurnScore {
         if (id == 0) {
             String sql = "INSERT INTO turn_scores "
                 + "(turn_id, scoring_run_id, target_nomination_id, resolution_method, confidence, "
-                + "sentence_count, total_score, avg_score, weighted_score) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                + "avg_sentiment_confidence, sentence_count, total_score, avg_score, weighted_score) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
             Map<Integer, Object> params = new LinkedHashMap<>();
             params.put(1, turnId);
@@ -51,10 +55,11 @@ public class TurnScore {
             params.put(3, targetNominationId);
             params.put(4, resolutionMethod);
             params.put(5, confidence);
-            params.put(6, sentenceCount);
-            params.put(7, totalScore);
-            params.put(8, avgScore);
-            params.put(9, weightedScore);
+            params.put(6, avgSentimentConfidence);
+            params.put(7, sentenceCount);
+            params.put(8, totalScore);
+            params.put(9, avgScore);
+            params.put(10, weightedScore);
 
             long generatedId = db.executeInsert(sql, params);
             if (generatedId > 0) {
@@ -65,7 +70,8 @@ public class TurnScore {
         } else {
             String sql = "UPDATE turn_scores SET "
                 + "turn_id = ?, scoring_run_id = ?, target_nomination_id = ?, resolution_method = ?, "
-                + "confidence = ?, sentence_count = ?, total_score = ?, avg_score = ?, weighted_score = ? "
+                + "confidence = ?, avg_sentiment_confidence = ?, sentence_count = ?, "
+                + "total_score = ?, avg_score = ?, weighted_score = ? "
                 + "WHERE id = ?";
 
             Map<Integer, Object> params = new LinkedHashMap<>();
@@ -74,11 +80,12 @@ public class TurnScore {
             params.put(3, targetNominationId);
             params.put(4, resolutionMethod);
             params.put(5, confidence);
-            params.put(6, sentenceCount);
-            params.put(7, totalScore);
-            params.put(8, avgScore);
-            params.put(9, weightedScore);
-            params.put(10, id);
+            params.put(6, avgSentimentConfidence);
+            params.put(7, sentenceCount);
+            params.put(8, totalScore);
+            params.put(9, avgScore);
+            params.put(10, weightedScore);
+            params.put(11, id);
 
             int affected = db.execute(sql, params);
             System.out.printf("[TurnScore] Updated id=%d (%d row%s affected)%n",
@@ -133,6 +140,7 @@ public class TurnScore {
         turnScore.resolutionMethod = row.get("resolution_method") != null
             ? row.get("resolution_method").toString() : null;
         turnScore.confidence = toDouble(row.get("confidence"));
+        turnScore.avgSentimentConfidence = toDouble(row.get("avg_sentiment_confidence"));
         turnScore.sentenceCount = toInteger(row.get("sentence_count"));
         turnScore.totalScore = toInteger(row.get("total_score"));
         turnScore.avgScore = toDouble(row.get("avg_score"));
@@ -158,6 +166,7 @@ public class TurnScore {
     public Integer getTargetNominationId() { return targetNominationId; }
     public String getResolutionMethod() { return resolutionMethod; }
     public Double getConfidence() { return confidence; }
+    public Double getAvgSentimentConfidence() { return avgSentimentConfidence; }
     public Integer getSentenceCount() { return sentenceCount; }
     public Integer getTotalScore() { return totalScore; }
     public Double getAvgScore() { return avgScore; }
@@ -169,6 +178,7 @@ public class TurnScore {
     public void setTargetNominationId(Integer targetNominationId) { this.targetNominationId = targetNominationId; }
     public void setResolutionMethod(String resolutionMethod) { this.resolutionMethod = resolutionMethod; }
     public void setConfidence(Double confidence) { this.confidence = confidence; }
+    public void setAvgSentimentConfidence(Double v) { this.avgSentimentConfidence = v; }
     public void setSentenceCount(Integer sentenceCount) { this.sentenceCount = sentenceCount; }
     public void setTotalScore(Integer totalScore) { this.totalScore = totalScore; }
     public void setAvgScore(Double avgScore) { this.avgScore = avgScore; }

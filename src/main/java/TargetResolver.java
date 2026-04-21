@@ -73,6 +73,16 @@ public class TargetResolver {
         Pattern.CASE_INSENSITIVE
     );
 
+    /**
+     * Matches a non-default title address (anything other than "Mr.") so we
+     * can correct nominees whose title was set to the "Mr." default at parse time.
+     * Group 1 = title, Group 2 = last name.
+     */
+    private static final Pattern ADDRESS_WITH_NONNEUTRAL_TITLE = Pattern.compile(
+        "\\b(Judge|Ms\\.|Mrs\\.)\\s+([A-Za-z][A-Za-z'\\-]+),",
+        Pattern.CASE_INSENSITIVE
+    );
+
     private static volatile StanfordCoreNLP nerPipeline;
     private static final Object NER_LOCK = new Object();
 
@@ -83,7 +93,7 @@ public class TargetResolver {
     );
 
     private static final Set<String> SENATOR_TITLES = Set.of(
-        "Chairman", "The Chairman", "Senator"
+        "Chairman", "The Chairman", "Senator", "Ranking Member", "Vice Chairman"
     );
 
     // ── Public API ───────────────────────────────────────────────────────
@@ -358,6 +368,35 @@ public class TargetResolver {
                     existing.getFirstName(), existing.getLastName(),
                     existing.getPosition(), actualTitle);
                 section.addNominee(corrected);
+            }
+        }
+
+        // Second pass: scan senator turn text for non-default title addresses
+        // (e.g. "Ms. Martin," or "Judge Chen,") to correct any nominee still
+        // carrying the "Mr." default who never appeared as their own speaker turn.
+        for (SpeakerTurn turn : turns) {
+            if (turn.getText() == null || turn.getText().isBlank()) continue;
+            HearingSection section = findSection(turn.getStartLine(), sections);
+            if (section == null) continue;
+
+            Matcher m = ADDRESS_WITH_NONNEUTRAL_TITLE.matcher(turn.getText());
+            while (m.find()) {
+                String addressTitle    = m.group(1);
+                String addressedLast   = m.group(2);
+
+                NomineeInfo toCorrect = null;
+                for (NomineeInfo nominee : section.getNominees()) {
+                    if (nominee.getLastName().equalsIgnoreCase(addressedLast)
+                            && "Mr.".equals(nominee.getTitleUsed())) {
+                        toCorrect = nominee;
+                        break;
+                    }
+                }
+                if (toCorrect != null) {
+                    section.addNominee(new NomineeInfo(
+                        toCorrect.getFirstName(), toCorrect.getLastName(),
+                        toCorrect.getPosition(), addressTitle));
+                }
             }
         }
     }
