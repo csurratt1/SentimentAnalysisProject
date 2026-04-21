@@ -1,6 +1,6 @@
 # Senate Confirmation Hearing Sentiment Analysis
 
-Year-long Concordia College CS research project for analyzing U.S. Senate confirmation hearing transcripts with NLP and storing structured results in MySQL.
+Semester-Long Concordia College CS research project for analyzing U.S. Senate confirmation hearing transcripts with NLP and storing structured results in MySQL.
 
 ## What This Project Does
 
