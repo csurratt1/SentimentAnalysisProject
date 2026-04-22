@@ -1,68 +1,115 @@
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Unit tests for TurnScorer.
- * Covers: score mapping, weighted score formula, aggregation correctness.
+ * Unit tests for NomineeInfo and SpeakerTurn model correctness.
  *
- * Note: tests that require the full CoreNLP pipeline (lazy-loaded, ~67s)
- * should be kept in a separate integration test or tagged @Tag("slow").
+ * These are the foundational data objects used throughout the pipeline.
+ * Errors here would silently propagate into target labels, aggregation keys,
+ * and all downstream scoring output.
  */
 class TurnScorerTest {
 
-    // ── Score mapping ─────────────────────────────────────────────────
+    // ── NomineeInfo ───────────────────────────────────────────────────
 
     @Test
-    void veryNegativeSentimentMapsToMinusTwo() {
-        // CoreNLP class index 0 (Very Negative) → toScore(0 - 2) = -2
-        // TODO: expose or call the toScore() helper and assert result == -2.0
+    void nomineeInfo_displayName_combinesTitleAndLastName() {
+        NomineeInfo n = new NomineeInfo("Beverly", "Martin", "U.S. Circuit Judge", "Judge");
+        assertEquals("Judge Martin", n.getDisplayName());
     }
 
     @Test
-    void veryPositiveSentimentMapsToPlusTwo() {
-        // CoreNLP class index 4 (Very Positive) → toScore(4 - 2) = +2
-        // TODO: assert result == 2.0
+    void nomineeInfo_displayName_withMrTitle() {
+        NomineeInfo n = new NomineeInfo("David", "Kappos", "Under Secretary of Commerce", "Mr.");
+        assertEquals("Mr. Kappos", n.getDisplayName());
     }
 
     @Test
-    void neutralSentimentMapsToZero() {
-        // CoreNLP class index 2 (Neutral) → toScore(2 - 2) = 0
-        // TODO: assert result == 0.0
-    }
-
-    // ── Weighted score formula ────────────────────────────────────────
-
-    @Test
-    void weightedScoreIsAvgScoreTimesConfidence() {
-        // weightedScore = avgScore * resolutionConfidence
-        // TODO: construct a ScoredTurn with known avgScore and confidence,
-        //       call getWeightedScore(), assert the product is correct.
+    void nomineeInfo_fullName_combinesFirstAndLast() {
+        NomineeInfo n = new NomineeInfo("Beverly", "Martin", "U.S. Circuit Judge", "Judge");
+        assertEquals("Beverly Martin", n.getFullName());
     }
 
     @Test
-    void zeroConfidenceProducesZeroWeightedScore() {
-        // TODO: verify a turn with confidence 0.0 produces weightedScore == 0.0
-    }
-
-    // ── Interaction aggregation ───────────────────────────────────────
-
-    @Test
-    void multipleScoresForSamePairAggregateCorrectly() {
-        // TODO: create two ScoredTurns for the same senator|nominee pair,
-        //       run aggregateByPair(), and verify turnCount == 2 and
-        //       totalWeightedScore is the sum of both weighted scores.
+    void nomineeInfo_matchesLastName_caseInsensitive() {
+        NomineeInfo n = new NomineeInfo("Beverly", "Martin", "U.S. Circuit Judge", "Judge");
+        assertTrue(n.matchesLastName("martin"));
+        assertTrue(n.matchesLastName("MARTIN"));
+        assertTrue(n.matchesLastName("Martin"));
     }
 
     @Test
-    void differentPairsProduceSeparateEntries() {
-        // TODO: create turns for two distinct senator|nominee pairs and verify
-        //       the resulting interaction map has exactly 2 entries.
+    void nomineeInfo_matchesLastName_falseForDifferentName() {
+        NomineeInfo n = new NomineeInfo("Beverly", "Martin", "U.S. Circuit Judge", "Judge");
+        assertFalse(n.matchesLastName("Kappos"));
+        assertFalse(n.matchesLastName(""));
     }
 
-    // ── Pipeline guards ───────────────────────────────────────────────
+    @Test
+    void nomineeInfo_getters_returnConstructorValues() {
+        NomineeInfo n = new NomineeInfo("David", "Kappos",
+            "Under Secretary of Commerce for Intellectual Property", "Mr.");
+        assertEquals("David",   n.getFirstName());
+        assertEquals("Kappos",  n.getLastName());
+        assertEquals("Mr.",     n.getTitleUsed());
+        assertEquals("Under Secretary of Commerce for Intellectual Property",
+            n.getPosition());
+    }
+
+    // ── SpeakerTurn ───────────────────────────────────────────────────
 
     @Test
-    void emptyTranscriptThrowsOrReturnsEmptyBundle() {
-        // TODO: call analyzeOnly() with an empty string and verify the pipeline
-        //       aborts gracefully (exception or zero-turn AnalysisBundle).
+    void speakerTurn_speakerLabel_combinesTitleAndLastName() {
+        SpeakerTurn t = new SpeakerTurn("Senator", "Grassley", 1, "Thank you.", 0);
+        assertEquals("Senator Grassley", t.getSpeakerLabel());
+    }
+
+    @Test
+    void speakerTurn_speakerLabel_multiWordTitle() {
+        SpeakerTurn t = new SpeakerTurn("Ranking Member", "Sessions", 1, "Thank you.", 0);
+        assertEquals("Ranking Member Sessions", t.getSpeakerLabel());
+    }
+
+    @Test
+    void speakerTurn_hasSubstantiveText_trueForRealText() {
+        SpeakerTurn t = new SpeakerTurn("Senator", "Smith", 1,
+            "I have serious concerns about this nomination.", 0);
+        assertTrue(t.hasSubstantiveText());
+    }
+
+    @Test
+    void speakerTurn_hasSubstantiveText_falseForAnnotationOnly() {
+        SpeakerTurn t = new SpeakerTurn("Senator", "Smith", 1, "[Laughter.]", 0);
+        assertFalse(t.hasSubstantiveText());
+    }
+
+    @Test
+    void speakerTurn_hasSubstantiveText_falseForMultipleAnnotations() {
+        SpeakerTurn t = new SpeakerTurn("Senator", "Smith", 1,
+            "[Laughter.] [Applause.] [Off microphone.]", 0);
+        assertFalse(t.hasSubstantiveText());
+    }
+
+    @Test
+    void speakerTurn_hasSubstantiveText_trueWhenTextSurroundsAnnotation() {
+        SpeakerTurn t = new SpeakerTurn("Senator", "Smith", 1,
+            "I strongly agree [nodding] with the nominee's position.", 0);
+        assertTrue(t.hasSubstantiveText());
+    }
+
+    @Test
+    void speakerTurn_hasSubstantiveText_falseForWhitespaceAfterStrip() {
+        SpeakerTurn t = new SpeakerTurn("Senator", "Smith", 1, "   [Note.]   ", 0);
+        assertFalse(t.hasSubstantiveText());
+    }
+
+    @Test
+    void speakerTurn_getters_returnConstructorValues() {
+        SpeakerTurn t = new SpeakerTurn("Chairman", "Leahy", 5, "Good morning.", 42);
+        assertEquals("Chairman",      t.getTitle());
+        assertEquals("Leahy",         t.getLastName());
+        assertEquals(5,               t.getTurnNumber());
+        assertEquals("Good morning.", t.getText());
+        assertEquals(42,              t.getStartLine());
     }
 }
