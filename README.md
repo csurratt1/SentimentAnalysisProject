@@ -249,33 +249,6 @@ JSON includes:
 - `interactions`
 - `nominees`
 
-## Class Demo Guide (10-15 Minutes)
-
-1. Show project goal
-- Explain this is hearing-text -> interaction analytics, not generic sentiment on isolated sentences.
-
-2. Run GUI
-- Start with `Main`, open Run Analysis page.
-
-3. Run one sample transcript
-- Use `input/qa_exchange_test.txt` first.
-- Keep preview ON to show pre-commit report review.
-
-4. Show outputs
-- Open Results tab.
-- Compare TXT summary and JSON structure.
-
-5. Show DB persistence impact
-- Re-run with DB enabled.
-- Point out Dashboard DB summary values (hearing id, run id, turns, scores, replaced prior).
-
-6. Explain confidence and weighting
-- Resolution confidence and sentiment confidence are tracked separately.
-- Weighted sentiment uses target confidence.
-
-7. Discuss extension opportunities
-- Better parser robustness, richer test coverage, logging, analytics UI.
-
 ## Handoff Notes for New Students
 
 Start here in order:
