@@ -75,8 +75,8 @@ classDiagram
     }
 
     Main --> SentimentAnalysisApp : launches
-    SentimentAnalysisApp +-- FileNameRenderer : inner class
-    SentimentAnalysisApp +-- RunOutcome : inner class
+    SentimentAnalysisApp *-- FileNameRenderer : inner class
+    SentimentAnalysisApp *-- RunOutcome : inner class
     SentimentAnalysisApp --> Dashboard : navigates to
     SentimentAnalysisApp --> RunAnalysisScreen : navigates to
     SentimentAnalysisApp --> ResultsScreen : navigates to

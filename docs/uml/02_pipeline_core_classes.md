@@ -145,16 +145,16 @@ classDiagram
     TurnScorer --> TargetResolver : uses
     TurnScorer --> SpeakerAliasResolver : uses
     TurnScorer --> ScoringPersistence : uses
-    TurnScorer +-- RunResult : inner class
-    TurnScorer +-- AnalysisBundle : inner class
-    TurnScorer +-- InteractionScore : inner class
+    TurnScorer *-- RunResult : inner class
+    TurnScorer *-- AnalysisBundle : inner class
+    TurnScorer *-- InteractionScore : inner class
     SpeakerTurnParser ..> SpeakerTurn : creates
     TargetResolver ..> ResolvedTarget : creates
     TargetResolver --> SpeakerTurn : reads
     ResolvedTarget --> SpeakerTurn : wraps
     ResolvedTarget --> NomineeInfo : targets
     ScoredTurn --> ResolvedTarget : wraps
-    SpeakerAliasResolver +-- AliasMap : inner class
-    ScoringPersistence +-- PersistenceResult : inner class
+    SpeakerAliasResolver *-- AliasMap : inner class
+    ScoringPersistence *-- PersistenceResult : inner class
     ScoringPersistence --> AnalysisBundle : reads
 ```
