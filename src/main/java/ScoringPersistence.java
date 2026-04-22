@@ -1,5 +1,7 @@
 import java.sql.Connection;
 import java.sql.SQLException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -12,6 +14,8 @@ import java.util.*;
  * Persists one scoring run into MySQL using the project entity classes.
  */
 public class ScoringPersistence {
+
+    private static final Logger LOG = LoggerFactory.getLogger(ScoringPersistence.class);
 
     public static class PersistenceResult {
         private final int hearingId;
@@ -118,9 +122,9 @@ public class ScoringPersistence {
             if (conn != null) {
                 try {
                     conn.rollback();
-                    System.err.println("[DB] Transaction rolled back.");
+                    LOG.error("DB transaction rolled back due to: {}", e.getMessage(), e);
                 } catch (SQLException rollbackEx) {
-                    System.err.println("[DB] Rollback failed: " + rollbackEx.getMessage());
+                    LOG.error("Rollback failed: {}", rollbackEx.getMessage(), rollbackEx);
                 }
             }
             throw e;

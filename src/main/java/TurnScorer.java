@@ -17,6 +17,8 @@ import java.nio.file.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * TurnScorer.java
@@ -39,6 +41,8 @@ import java.util.*;
  * <p>Run standalone: {@code java -Xmx4g TurnScorer hearing.txt}</p>
  */
 public class TurnScorer {
+
+    private static final Logger LOG = LoggerFactory.getLogger(TurnScorer.class);
 
     /**
      * Result object returned by non-CLI pipeline execution.
@@ -1062,10 +1066,7 @@ public class TurnScorer {
                     promotePendingOutput(pendingTxtFile, txtFile);
                 }
             } catch (Throwable t) {
-                System.err.println("[DB] Persistence failed: " + t.getMessage());
-                if (verbose) {
-                    t.printStackTrace(System.err);
-                }
+                LOG.error("DB persistence failed: {}", t.getMessage(), t);
                 deleteIfExistsQuietly(pendingJsonFile);
                 deleteIfExistsQuietly(pendingTxtFile);
                 jsonFile = null;

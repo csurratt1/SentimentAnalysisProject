@@ -2,6 +2,8 @@ import java.io.*;
 import java.nio.file.*;
 import java.sql.*;
 import java.util.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * DatabaseManager.java
@@ -35,6 +37,8 @@ import java.util.*;
  * }</pre>
  */
 public class DatabaseManager {
+
+    private static final Logger LOG = LoggerFactory.getLogger(DatabaseManager.class);
 
     // ── Connection state ─────────────────────────────────────────────
 
@@ -101,7 +105,7 @@ public class DatabaseManager {
                     System.out.println("[DB] Disconnected.");
                 }
             } catch (SQLException e) {
-                System.err.println("[DB] Error closing connection: " + e.getMessage());
+                LOG.error("Error closing connection: {}", e.getMessage(), e);
             } finally {
                 connection = null;
             }
@@ -291,13 +295,13 @@ public class DatabaseManager {
                     System.out.println("[DB] Loaded config from: " + path);
                     break;
                 } catch (IOException e) {
-                    System.err.println("[DB] Error reading " + path + ": " + e.getMessage());
+                    LOG.error("Error reading {}: {}", path, e.getMessage(), e);
                 }
             }
         }
 
         if (!loaded) {
-            System.err.println("[DB] WARNING: db.properties not found. Using defaults.");
+            LOG.warn("db.properties not found. Using default connection values.");
         }
 
         this.host     = props.getProperty("db.host", "localhost");

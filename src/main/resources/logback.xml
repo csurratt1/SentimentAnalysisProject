@@ -1,0 +1,35 @@
+<configuration>
+
+    <!-- Console: show WARN and above -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>WARN</level>
+        </filter>
+        <encoder>
+            <pattern>%d{HH:mm:ss} [%-5level] %logger{0} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- File: persist all ERROR and WARN messages to logs/app.log -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/app.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <!-- Keep 30 days of logs, one file per day -->
+            <fileNamePattern>logs/app.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>30</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss} [%-5level] %logger{0} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Suppress CoreNLP and library chatter below WARN -->
+    <logger name="edu.stanford" level="WARN"/>
+    <logger name="org.apache" level="WARN"/>
+
+    <root level="WARN">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+
+</configuration>
