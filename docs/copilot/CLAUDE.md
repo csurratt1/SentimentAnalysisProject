@@ -1,6 +1,6 @@
 # Claude Code Project Context — Senate Hearing Sentiment Analysis
 
-Last updated: 2026-04-22
+Last updated: 2026-04-23
 
 This file is the authoritative context for Claude Code sessions on this project. Read it at the start of every session.
 
@@ -141,29 +141,45 @@ Connection: `db.properties` (gitignored). Keys: `db.host`, `db.port`, `db.name`,
 
 ## Rubric Checklist (CSC 470 Final — Mastery tier)
 
-Items marked as still open or uncertain:
-
 | ID | Requirement | Status |
 |----|-------------|--------|
-| M3 | UML diagrams for ≥ 4 major components | Done (`docs/uml/` — 4 diagrams) |
+| M3 | UML diagrams for ≥ 4 major components | Done (`docs/uml/` — 4 diagrams, Mermaid errors fixed) |
 | M4 | Time estimates for each major component | Done (`docs/time_estimates.md`) |
 | M5 | All hours in 0.25 hr increments | Done |
-| M7 | Code comments + citations for external help/code | Verify before submission |
-| M13 | CRUD in DB | Create ✓, Read ✓, Update (upsert) ✓ — verify explicit Delete path |
-| M16 | No magic numbers | Verify — check for raw ints/doubles inline in scoring logic |
+| M7 | Code comments + citations for external help/code | **Open — verify before submission** |
+| M13 | CRUD in DB | Create ✓, Read ✓, Update (upsert) ✓ — **verify explicit Delete path** |
+| M16 | No magic numbers | **Open — check for raw ints/doubles inline in scoring logic** |
 | M17 | Input validation | File type and empty input guards in place — verify edge cases |
 | M18 | Graceful error messages | GUI dialogs + log area in place |
-| M19 | Error logging | SLF4J binding missing (fallback warning only) — open item |
-| M20 | Unit tests for major components | Minimal — open item |
+| M19 | Error logging | Done — SLF4J + Logback; file appender to `logs/app.log`; daily rolling; integrated in `DatabaseManager`, `ScoringPersistence`, `TurnScorer` |
+| M20 | Unit tests for major components | Done — 101 tests passing; 5 test files in `src/test/java/` |
+
+---
+
+## Unit Test Coverage (M20 — completed 2026-04-23)
+
+101 tests, 0 failures. Files in `src/test/java/`:
+
+| File | Tests | Focus |
+|------|-------|-------|
+| `SpeakerTurnParserTest.java` | 21 | Parser regex, turn segmentation, TOC/annotation filtering, title recognition |
+| `ScoredTurnTest.java` | 16 | Weighted score math, avgScore formula, confidence storage |
+| `AggregationTest.java` | 16 | `InteractionScore` accumulation, reliability tier thresholds, `aggregate()` |
+| `SpeakerAliasResolverTest.java` | 20 | Alias merging, canonical election, title tie-breaking, exclusions |
+| `TargetResolverTest.java` | 14 | `ResolvedTarget` model, `hasSpecificTarget`, `isSelfTurn`, panel immutability |
+| `TurnScorerTest.java` | 14 | `NomineeInfo` + `SpeakerTurn` model correctness, all getters |
+
+Run with: `.\mvnw.cmd test`
 
 ---
 
 ## Known Open Items
 
-1. **SLF4J logging** — no binding configured; add `slf4j-simple` to `pom.xml` (medium priority, deferred).
-2. **Unit test coverage** — minimal; integration-tested via workflow but not automated (rubric M20).
-3. **Parser edge cases** — some heading/annotation noise in certain transcript formats.
-4. **Unused code** — some unused constants in `TurnScorer`, unused import in `SpeakerTurnParser`, generics warning in `TargetResolver`.
+1. **M7 — Code comments/citations**: Review all source files for any external help or copied snippets before submission; ensure attribution comments are in place.
+2. **M13 — Explicit Delete path**: Confirm there is at least one exercised code path that deletes a DB row (not just upsert/replace). `ScoringPersistence` clears child rows on re-run — verify this qualifies.
+3. **M16 — Magic numbers**: Scan scoring logic for inline literals (e.g., the `classIndex - 2` mapping, reliability tier thresholds `0.85`/`0.65`). These should be named constants.
+4. **Parser edge cases** — some heading/annotation noise in certain transcript formats.
+5. **Unused code** — some unused constants in `TurnScorer`, unused import in `SpeakerTurnParser`, generics warning in `TargetResolver`.
 
 ---
 

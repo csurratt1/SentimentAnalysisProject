@@ -128,9 +128,16 @@ public class TurnScorer {
         "Very Negative", "Negative", "Neutral", "Positive", "Very Positive"
     };
 
+    // CoreNLP sentiment class index runs 0–4; subtracting this offset maps it to [-2, +2].
+    private static final int SENTIMENT_SCORE_OFFSET = 2;
+
+    // Resolution-confidence thresholds for the reliability tier reported per interaction.
+    private static final double HIGH_CONF_THRESHOLD = 0.85;
+    private static final double MED_CONF_THRESHOLD  = 0.65;
+
     /** Maps CoreNLP's 0-4 class index to [-2, +2] integer score. */
     private static int toScore(int classIndex) {
-        return classIndex - 2;
+        return classIndex - SENTIMENT_SCORE_OFFSET;
     }
 
     // ── Known senator titles (for filtering approval-relevant turns) ─────
@@ -203,7 +210,7 @@ public class TurnScorer {
 
         String reliabilityTier() {
             double r = avgResolutionConf();
-            return r >= 0.85 ? "HIGH" : r >= 0.65 ? "MED" : "LOW";
+            return r >= HIGH_CONF_THRESHOLD ? "HIGH" : r >= MED_CONF_THRESHOLD ? "MED" : "LOW";
         }
 
         /** Returns alias labels (non-canonical) that contributed turns to this interaction. */
