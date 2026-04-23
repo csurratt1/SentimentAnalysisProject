@@ -176,10 +176,32 @@ Run with: `.\mvnw.cmd test`
 ## Known Open Items
 
 1. **M7 — Code comments/citations**: Review all source files for any external help or copied snippets before submission; ensure attribution comments are in place.
-2. **M13 — Explicit Delete path**: Confirm there is at least one exercised code path that deletes a DB row (not just upsert/replace). `ScoringPersistence` clears child rows on re-run — verify this qualifies.
-3. **M16 — Magic numbers**: Scan scoring logic for inline literals (e.g., the `classIndex - 2` mapping, reliability tier thresholds `0.85`/`0.65`). These should be named constants.
-4. **Parser edge cases** — some heading/annotation noise in certain transcript formats.
-5. **Unused code** — some unused constants in `TurnScorer`, unused import in `SpeakerTurnParser`, generics warning in `TargetResolver`.
+2. **M13 — Explicit Delete path**: `ScoringPersistence` executes 4 live `DELETE` statements on re-run (lines 185-188); all 6 entity classes have static `.delete()` methods. Confirm with grader this satisfies CRUD requirement.
+3. **M16 — Magic numbers**: Done (2026-04-23) — `SENTIMENT_SCORE_OFFSET`, `HIGH_CONF_THRESHOLD`, `MED_CONF_THRESHOLD` added to `TurnScorer.java`.
+4. **Unused code** — some unused constants in `TurnScorer`, unused import in `SpeakerTurnParser`, generics warning in `TargetResolver`.
+
+---
+
+## Accuracy Improvement Backlog (reviewed 2026-04-23)
+
+Full review identified the following issues. Address in priority order — consult user before starting any item.
+
+### High Impact
+- **SELF-detection title collision** (`TargetResolver.java`): Senators with title "Mr." whose last name matches a nominee's are misclassified as SELF turns and silently excluded from aggregation.
+- **Weighted score conflates two confidence types** (`ScoredTurn.java`, `TurnScorer.java`): `avgScore * resolutionConfidence` mixes sentiment confidence (how sure CoreNLP is) with target-resolution confidence (how sure we are who was targeted). These are orthogonal and multiplying them dampens clearly-scored turns with ambiguous targets.
+- **No intra-turn target splitting** (`TargetResolver.java`): A senator turn addressing multiple nominees (e.g., praising one, criticizing another) is assigned one target. Mixed-signal turns pollute the interaction matrix.
+
+### Medium Impact (prioritized by effort/benefit)
+1. **Inverted section-default confidence** (`TargetResolver.java`): Single-nominee panels get 0.50, multi-nominee get 0.30. Should be reversed — single-nominee is unambiguous and deserves higher confidence. Very low effort fix.
+2. **Direct address pattern too narrow** (`TargetResolver.java`): Pattern requires a comma after the name (`"Judge Smith,"`). Should also match dash, question mark, and period endings. Low effort, more turns get DIRECT_ADDRESS confidence (0.95).
+3. **TOC dot-leader filter too aggressive** (`SpeakerTurnParser.java`): 4+ consecutive dots filter could suppress legitimate speech with ellipses. Fix: require a trailing page number (digits) to confirm it is a TOC line.
+4. **Sentence averaging hides concentrated signals** (`TurnScorer.java`): One strong sentence (+2) diluted by neutral procedural sentences produces misleadingly mild avg scores. Consider flagging single-dominant-sentence turns or weighting by sentence length.
+5. **PRIOR_CONTEXT bleeds across section boundaries** (`TargetResolver.java`): Turn immediately after a section transition may inherit the prior section's nominee as target.
+
+### Low Impact
+- Alias turn counts drawn from full transcript, not scored subset — alias report numbers overcount non-substantive turns.
+- Reliability tier is redundant with already-weighted score (avgWeighted already embeds confidence).
+- Sentence boundary detection may split on abbreviations ("Mr. Smith", "U.S.") creating artificial sentence splits.
 
 ---
 
