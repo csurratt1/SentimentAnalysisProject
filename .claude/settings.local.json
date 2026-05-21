@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"/c/Program Files/Java/jdk-17/bin/java\" -version)",
+      "Read(//c/Users/colto/**)",
+      "Bash(\"/c/Users/colto/.maven/maven-3.9.12/bin/mvn\" test *)",
+      "Bash(\"/c/Program Files/MySQL/MySQL Server 8.0/bin/mysql.exe\" -u root -pp70I6PnwKWWtr6)"
+    ]
+  }
+}

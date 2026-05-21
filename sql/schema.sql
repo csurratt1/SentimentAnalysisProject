@@ -15,10 +15,12 @@ CREATE DATABASE IF NOT EXISTS sentiment_analysis
 
 USE sentiment_analysis;
 
--- Drop view first to avoid dependency issues on table recreation
+-- Drop views first to avoid dependency issues on table recreation
+DROP VIEW IF EXISTS sentence_scores_view;
 DROP VIEW IF EXISTS interactions_view;
 
--- Drop in child-to-parent order
+-- Drop in child-to-parent order (sentence_scores before turn_scores)
+DROP TABLE IF EXISTS sentence_scores;
 DROP TABLE IF EXISTS turn_scores;
 DROP TABLE IF EXISTS scoring_runs;
 DROP TABLE IF EXISTS turns;
@@ -174,6 +176,33 @@ CREATE TABLE turn_scores (
         FOREIGN KEY (target_nomination_id) REFERENCES nominations(id)
 ) ENGINE=InnoDB;
 
+-- 8) SENTENCE_SCORES: one row per CoreNLP-scored sentence within a turn
+--    sentiment_label is stored (not just derivable from sentiment_class) so that
+--    SQL queries like GROUP BY sentiment_label work without mapping logic.
+CREATE TABLE sentence_scores (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    turn_score_id       INT NOT NULL,     -- FK -> turn_scores(id)
+    scoring_run_id      INT NOT NULL,     -- FK -> scoring_runs(id); enables cross-run queries
+    turn_id             INT NOT NULL,     -- FK -> turns(id)
+    sentence_index      INT NOT NULL,     -- 1-based position within the turn
+    sentence_text       TEXT NOT NULL,
+    sentiment_class     TINYINT NOT NULL, -- CoreNLP class 0..4
+    sentiment_label     VARCHAR(20),      -- e.g. 'Negative' (derived from sentiment_class)
+    sentiment_score     TINYINT NOT NULL, -- class mapped to [-2, +2]
+    confidence          DECIMAL(6,4),
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_turn_score_sentence (turn_score_id, sentence_index),
+    INDEX idx_sentence_scores_run  (scoring_run_id),
+    INDEX idx_sentence_scores_turn (turn_id),
+    CONSTRAINT fk_sentence_score_turn_score
+        FOREIGN KEY (turn_score_id)  REFERENCES turn_scores(id)   ON DELETE CASCADE,
+    CONSTRAINT fk_sentence_score_run
+        FOREIGN KEY (scoring_run_id) REFERENCES scoring_runs(id)  ON DELETE CASCADE,
+    CONSTRAINT fk_sentence_score_turn
+        FOREIGN KEY (turn_id)        REFERENCES turns(id)          ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 -- Computed aggregation view for senator -> nominee interaction analytics
 CREATE VIEW interactions_view AS
 SELECT
@@ -203,3 +232,29 @@ JOIN speakers s_nominee ON n.speaker_id = s_nominee.id
 WHERE ts.resolution_method != 'SELF'
   AND ts.resolution_method != 'UNKNOWN'
 GROUP BY ts.scoring_run_id, t.speaker_id, n.id;
+
+-- Per-sentence detail view: joins sentence scores back to run / transcript / speaker / nominee.
+-- Use this for cross-run queries: SELECT * FROM sentence_scores_view WHERE transcript = '...';
+CREATE VIEW sentence_scores_view AS
+SELECT
+    ss.id,
+    ss.scoring_run_id,
+    sr.scored_at,
+    h.source_file                               AS transcript,
+    t.turn_number,
+    t.speaker_label,
+    ts.resolution_method,
+    CONCAT(n.title_used, ' ', sp_nom.last_name) AS nominee_label,
+    ss.sentence_index,
+    ss.sentence_text,
+    ss.sentiment_class,
+    ss.sentiment_label,
+    ss.sentiment_score,
+    ss.confidence
+FROM sentence_scores ss
+JOIN turn_scores ts      ON ss.turn_score_id  = ts.id
+JOIN turns t             ON ss.turn_id         = t.id
+JOIN scoring_runs sr     ON ss.scoring_run_id  = sr.id
+JOIN hearings h          ON sr.hearing_id       = h.id
+LEFT JOIN nominations n        ON ts.target_nomination_id = n.id
+LEFT JOIN speakers    sp_nom   ON n.speaker_id             = sp_nom.id;

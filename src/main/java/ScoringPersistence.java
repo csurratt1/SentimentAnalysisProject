@@ -22,24 +22,28 @@ public class ScoringPersistence {
         private final int scoringRunId;
         private final int turnsInserted;
         private final int turnScoresInserted;
+        private final int sentencesInserted;
         private final boolean replacedExistingRun;
 
         public PersistenceResult(int hearingId,
                                  int scoringRunId,
                                  int turnsInserted,
                                  int turnScoresInserted,
+                                 int sentencesInserted,
                                  boolean replacedExistingRun) {
             this.hearingId = hearingId;
             this.scoringRunId = scoringRunId;
             this.turnsInserted = turnsInserted;
             this.turnScoresInserted = turnScoresInserted;
+            this.sentencesInserted = sentencesInserted;
             this.replacedExistingRun = replacedExistingRun;
         }
 
-        public int getHearingId() { return hearingId; }
-        public int getScoringRunId() { return scoringRunId; }
-        public int getTurnsInserted() { return turnsInserted; }
-        public int getTurnScoresInserted() { return turnScoresInserted; }
+        public int getHearingId()           { return hearingId; }
+        public int getScoringRunId()        { return scoringRunId; }
+        public int getTurnsInserted()       { return turnsInserted; }
+        public int getTurnScoresInserted()  { return turnScoresInserted; }
+        public int getSentencesInserted()   { return sentencesInserted; }
         public boolean isReplacedExistingRun() { return replacedExistingRun; }
     }
 
@@ -104,17 +108,20 @@ public class ScoringPersistence {
             );
 
             int scoringRunId = insertScoringRun(db, hearingId, resolved, scored, interactions, totalMs);
-            int turnScoresInserted = insertTurnScores(db, scoringRunId, scored, turnIds, sections, nominationIds);
+            int[] scoreCounts = insertTurnScores(db, conn, scoringRunId, scored, turnIds, sections, nominationIds);
+            int turnScoresInserted = scoreCounts[0];
+            int sentencesInserted  = scoreCounts[1];
 
             conn.commit();
-            System.out.printf("[DB] Persisted hearing=%d run=%d turns=%d scored=%d%n",
-                hearingId, scoringRunId, resolved.size(), scored.size());
+            System.out.printf("[DB] Persisted hearing=%d run=%d turns=%d scored=%d sentences=%d%n",
+                hearingId, scoringRunId, resolved.size(), scored.size(), sentencesInserted);
 
             return new PersistenceResult(
                 hearingId,
                 scoringRunId,
                 turnIds.size(),
                 turnScoresInserted,
+                sentencesInserted,
                 replacedExistingRun
             );
 
@@ -409,17 +416,20 @@ public class ScoringPersistence {
         return run.getId();
     }
 
-    private static int insertTurnScores(DatabaseManager db,
-                                        int scoringRunId,
-                                        List<ScoredTurn> scored,
-                                        Map<Integer, Integer> turnIds,
-                                        List<HearingSection> sections,
-                                        Map<String, Integer> nominationIds)
+    private static int[] insertTurnScores(DatabaseManager db,
+                                          Connection conn,
+                                          int scoringRunId,
+                                          List<ScoredTurn> scored,
+                                          Map<Integer, Integer> turnIds,
+                                          List<HearingSection> sections,
+                                          Map<String, Integer> nominationIds)
             throws SQLException {
-        int inserted = 0;
+        int turnScoresInserted = 0;
+        int sentencesInserted  = 0;
+
         for (ScoredTurn st : scored) {
-            ResolvedTarget rt = st.getTarget();
-            SpeakerTurn turn = rt.getTurn();
+            ResolvedTarget rt   = st.getTarget();
+            SpeakerTurn    turn = rt.getTurn();
 
             Integer turnId = turnIds.get(turn.getTurnNumber());
             if (turnId == null) continue;
@@ -449,9 +459,13 @@ public class ScoringPersistence {
                 st.getWeightedScore()
             );
             row.save(db);
-            inserted++;
+            turnScoresInserted++;
+
+            sentencesInserted += SentenceScoreRecord.saveBatch(
+                conn, row.getId(), scoringRunId, turnId, st.getSentenceScores());
         }
-        return inserted;
+
+        return new int[]{ turnScoresInserted, sentencesInserted };
     }
 
     private static HearingSection findSection(int lineNumber, List<HearingSection> sections) {

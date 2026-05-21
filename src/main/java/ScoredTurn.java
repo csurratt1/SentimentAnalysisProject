@@ -1,3 +1,5 @@
+import java.util.*;
+
 /**
  * ScoredTurn.java
  *
@@ -13,20 +15,29 @@
 public class ScoredTurn {
 
     private final ResolvedTarget target;
-    private final int    sentenceCount;   // how many sentences CoreNLP found
-    private final int    totalScore;      // sum of per-sentence [-2,+2] scores
-    private final double avgScore;        // totalScore / sentenceCount
+    private final int    sentenceCount;
+    private final int    totalScore;
+    private final double avgScore;
     private final double avgSentimentConfidence;
+    private final List<SentenceScore> sentenceScores;
 
     public ScoredTurn(ResolvedTarget target, int sentenceCount,
                       int totalScore) {
-        this(target, sentenceCount, totalScore, 1.0);
+        this(target, sentenceCount, totalScore, 1.0, Collections.emptyList());
     }
 
     public ScoredTurn(ResolvedTarget target,
                       int sentenceCount,
                       int totalScore,
                       double avgSentimentConfidence) {
+        this(target, sentenceCount, totalScore, avgSentimentConfidence, Collections.emptyList());
+    }
+
+    public ScoredTurn(ResolvedTarget target,
+                      int sentenceCount,
+                      int totalScore,
+                      double avgSentimentConfidence,
+                      List<SentenceScore> sentenceScores) {
         this.target        = target;
         this.sentenceCount = sentenceCount;
         this.totalScore    = totalScore;
@@ -34,15 +45,19 @@ public class ScoredTurn {
             ? (double) totalScore / sentenceCount
             : 0.0;
         this.avgSentimentConfidence = avgSentimentConfidence;
+        this.sentenceScores = sentenceScores != null
+            ? Collections.unmodifiableList(new ArrayList<>(sentenceScores))
+            : Collections.emptyList();
     }
 
     // ── Getters ──────────────────────────────────────────────────────────
 
-    public ResolvedTarget getTarget()        { return target; }
-    public int            getSentenceCount() { return sentenceCount; }
-    public int            getTotalScore()    { return totalScore; }
-    public double         getAvgScore()      { return avgScore; }
-    public double         getAvgSentimentConfidence() { return avgSentimentConfidence; }
+    public ResolvedTarget     getTarget()                  { return target; }
+    public int                getSentenceCount()           { return sentenceCount; }
+    public int                getTotalScore()              { return totalScore; }
+    public double             getAvgScore()                { return avgScore; }
+    public double             getAvgSentimentConfidence()  { return avgSentimentConfidence; }
+    public List<SentenceScore> getSentenceScores()         { return sentenceScores; }
 
     /**
      * Returns the average score weighted by target-resolution confidence.

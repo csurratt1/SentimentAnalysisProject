@@ -17,6 +17,8 @@ import java.nio.file.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,6 +52,7 @@ public class TurnScorer {
     public static class RunResult {
         private final Path jsonFile;
         private final Path textFile;
+        private final Path verificationFile;
         private final int totalTurns;
         private final int scoredTurns;
         private final int interactionPairs;
@@ -59,6 +62,7 @@ public class TurnScorer {
 
         public RunResult(Path jsonFile,
                          Path textFile,
+                         Path verificationFile,
                          int totalTurns,
                          int scoredTurns,
                          int interactionPairs,
@@ -67,6 +71,7 @@ public class TurnScorer {
                          ScoringPersistence.PersistenceResult dbSummary) {
             this.jsonFile = jsonFile;
             this.textFile = textFile;
+            this.verificationFile = verificationFile;
             this.totalTurns = totalTurns;
             this.scoredTurns = scoredTurns;
             this.interactionPairs = interactionPairs;
@@ -77,6 +82,7 @@ public class TurnScorer {
 
         public Path getJsonFile() { return jsonFile; }
         public Path getTextFile() { return textFile; }
+        public Path getVerificationFile() { return verificationFile; }
         public int getTotalTurns() { return totalTurns; }
         public int getScoredTurns() { return scoredTurns; }
         public int getInteractionPairs() { return interactionPairs; }
@@ -253,13 +259,15 @@ public class TurnScorer {
 
         if (sentences == null || sentences.isEmpty()) return null;
 
+        List<SentenceScore> sentenceScores = new ArrayList<>();
         int totalScore = 0;
         double totalSentimentConfidence = 0.0;
         for (CoreMap sentence : sentences) {
             Tree tree = sentence.get(
                 SentimentCoreAnnotations.SentimentAnnotatedTree.class);
             int classIdx = RNNCoreAnnotations.getPredictedClass(tree);
-            totalScore += toScore(classIdx);
+            int sentScore = toScore(classIdx);
+            totalScore += sentScore;
 
             SimpleMatrix predictions = RNNCoreAnnotations.getPredictions(tree);
             double sentenceConfidence = 0.0;
@@ -269,13 +277,18 @@ public class TurnScorer {
                 }
             }
             totalSentimentConfidence += sentenceConfidence;
+
+            String sentText = sentence.get(CoreAnnotations.TextAnnotation.class);
+            if (sentText != null) sentText = sentText.replaceAll("\\s+", " ").trim();
+            else sentText = "";
+            sentenceScores.add(new SentenceScore(sentText, classIdx, sentScore, sentenceConfidence));
         }
 
         double avgSentimentConfidence = sentences.isEmpty()
             ? 0.0
             : totalSentimentConfidence / sentences.size();
 
-        return new ScoredTurn(resolved, sentences.size(), totalScore, avgSentimentConfidence);
+        return new ScoredTurn(resolved, sentences.size(), totalScore, avgSentimentConfidence, sentenceScores);
     }
 
     // ── Report generation ────────────────────────────────────────────────
@@ -607,6 +620,101 @@ public class TurnScorer {
         return baos.toString(StandardCharsets.UTF_8);
     }
 
+    // ── Per-sentence verification report ─────────────────────────────────
+
+    /**
+     * Abbreviates verbose senator titles for the verification report header line.
+     * Keeps the file readable when turns are densely packed.
+     */
+    private static String abbreviateSpeakerLabel(String label) {
+        if (label == null) return "";
+        return label
+            .replaceFirst("^The Chairman\\b", "Chair.")
+            .replaceFirst("^Chairman\\b",     "Chair.")
+            .replaceFirst("^Senator\\b",      "Sen.");
+    }
+
+    /**
+     * Formats one sentence line: score bracket, confidence, and text.
+     * Example:  [-1 Negative     ] conf=0.62  I have grave concerns…
+     */
+    private static String formatSentenceLine(SentenceScore ss) {
+        String scoreStr = ss.getScore() > 0
+            ? "+" + ss.getScore()
+            : (ss.getScore() == 0 ? " 0" : Integer.toString(ss.getScore()));
+        return String.format("  [%s %-13s] conf=%.2f  %s",
+            scoreStr, ss.getLabel(), ss.getConfidence(), ss.getText());
+    }
+
+    /**
+     * Prints the per-sentence verification report to the given stream.
+     * Grouped by scored turn, with a summary header showing score-band distribution.
+     */
+    static void printSentenceVerification(PrintStream out, List<ScoredTurn> scored) {
+        out.println("=".repeat(70));
+        out.println("  PER-SENTENCE SCORING DETAIL  (manual verification reference)");
+        out.println("=".repeat(70));
+        out.println("Score key:  -2 Very Negative  -1 Negative   0 Neutral  +1 Positive  +2 Very Positive");
+        out.println();
+
+        // Compute distribution across all turns
+        int totalSentences = 0;
+        int turnsWithData = 0;
+        int[] bandCounts = new int[5]; // index 0 = score -2, index 4 = score +2
+        for (ScoredTurn st : scored) {
+            if (st.getSentenceScores().isEmpty()) continue;
+            turnsWithData++;
+            for (SentenceScore ss : st.getSentenceScores()) {
+                totalSentences++;
+                int band = ss.getScore() + 2; // map [-2,+2] → [0,4]
+                if (band >= 0 && band < 5) bandCounts[band]++;
+            }
+        }
+        out.printf("Turns with sentence data:  %d%n", turnsWithData);
+        out.printf("Sentences scored:          %d%n", totalSentences);
+        out.printf("Score distribution:   -2: %3d  -1: %3d   0: %3d  +1: %3d  +2: %3d%n",
+            bandCounts[0], bandCounts[1], bandCounts[2], bandCounts[3], bandCounts[4]);
+        out.println();
+
+        for (ScoredTurn st : scored) {
+            if (st.getSentenceScores().isEmpty()) continue;
+            ResolvedTarget rt = st.getTarget();
+            SpeakerTurn turn  = rt.getTurn();
+
+            String tgtStr = rt.isSelfTurn() ? "SELF"
+                : rt.hasSpecificTarget()
+                    ? rt.getNominee().getDisplayName() + " (" + friendlyMethod(rt.getMethod().toString()) + ")"
+                    : rt.getTargetLabel() + " (" + friendlyMethod(rt.getMethod().toString()) + ")";
+
+            out.println("-".repeat(70));
+            out.printf("Turn %d | SPK %s | TGT %s%n",
+                turn.getTurnNumber(),
+                abbreviateSpeakerLabel(turn.getSpeakerLabel()),
+                tgtStr);
+
+            for (SentenceScore ss : st.getSentenceScores()) {
+                out.println(formatSentenceLine(ss));
+            }
+            out.println();
+        }
+    }
+
+    static void writeSentenceVerificationReport(Path path, List<ScoredTurn> scored)
+            throws IOException {
+        try (PrintStream out = new PrintStream(
+                Files.newOutputStream(path), true, "UTF-8")) {
+            printSentenceVerification(out, scored);
+        }
+    }
+
+    static String buildVerificationPreview(AnalysisBundle analysis) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (PrintStream out = new PrintStream(baos, true, "UTF-8")) {
+            printSentenceVerification(out, analysis.getScored());
+        }
+        return baos.toString(StandardCharsets.UTF_8);
+    }
+
     private static void printScoreKey(PrintStream out) {
         out.println("SCORE KEY");
         out.println("-".repeat(70));
@@ -910,25 +1018,21 @@ public class TurnScorer {
         }
         long scoreStart = System.currentTimeMillis();
 
-        List<ScoredTurn> scored = new ArrayList<>();
-        int processedCount = 0;
+        AtomicInteger processedCount = new AtomicInteger(0);
+        int total = resolved.size();
 
-        for (ResolvedTarget rt : resolved) {
-            ScoredTurn st = scoreTurn(rt, pipeline);
-            if (st != null) {
-                scored.add(st);
-            }
-            processedCount++;
-
-            // Progress indicator every 25 turns
-            if (processedCount % 25 == 0 || processedCount == resolved.size()) {
-                if (printConsole) {
-                    System.out.printf("       %d / %d turns scored...%n",
-                        processedCount, resolved.size());
+        List<ScoredTurn> scored = resolved.parallelStream()
+            .map(rt -> {
+                ScoredTurn st = scoreTurn(rt, pipeline);
+                int n = processedCount.incrementAndGet();
+                if (printConsole && (n % 25 == 0 || n == total)) {
+                    System.out.printf("       %d / %d turns scored...%n", n, total);
                     System.out.flush();
                 }
-            }
-        }
+                return st;
+            })
+            .filter(Objects::nonNull)
+            .collect(Collectors.toList());
 
         long scoreMs = System.currentTimeMillis() - scoreStart;
         long totalMs = System.currentTimeMillis() - pipelineStart;
@@ -1013,8 +1117,10 @@ public class TurnScorer {
 
         Path jsonFile = null;
         Path txtFile = null;
+        Path verFile = null;
         Path pendingJsonFile = null;
         Path pendingTxtFile = null;
+        Path pendingVerFile = null;
 
         // 9. Write output files if output directory was specified
         if (outputDir != null) {
@@ -1028,20 +1134,25 @@ public class TurnScorer {
 
             jsonFile = outDir.resolve(scorePrefix + ".json");
             txtFile  = outDir.resolve(scorePrefix + ".txt");
+            verFile  = outDir.resolve(scorePrefix + "_sentences.txt");
 
             Path jsonWriteTarget = jsonFile;
-            Path txtWriteTarget = txtFile;
+            Path txtWriteTarget  = txtFile;
+            Path verWriteTarget  = verFile;
             if (persistDb) {
                 pendingJsonFile = outDir.resolve(scorePrefix + ".json.pending");
-                pendingTxtFile = outDir.resolve(scorePrefix + ".txt.pending");
+                pendingTxtFile  = outDir.resolve(scorePrefix + ".txt.pending");
+                pendingVerFile  = outDir.resolve(scorePrefix + "_sentences.txt.pending");
                 jsonWriteTarget = pendingJsonFile;
-                txtWriteTarget = pendingTxtFile;
+                txtWriteTarget  = pendingTxtFile;
+                verWriteTarget  = pendingVerFile;
             }
 
             writeJsonOutput(jsonWriteTarget, filePath, resolved, scored,
                             interactions, totalMs);
             writeTextReport(txtWriteTarget, verbose, resolved, scored,
                             interactions, analysis.getAliases(), totalMs);
+            writeSentenceVerificationReport(verWriteTarget, scored);
         }
 
         // 10. Persist to database
@@ -1071,13 +1182,16 @@ public class TurnScorer {
                 if (pendingJsonFile != null && pendingTxtFile != null) {
                     promotePendingOutput(pendingJsonFile, jsonFile);
                     promotePendingOutput(pendingTxtFile, txtFile);
+                    promotePendingOutput(pendingVerFile, verFile);
                 }
             } catch (Throwable t) {
                 LOG.error("DB persistence failed: {}", t.getMessage(), t);
                 deleteIfExistsQuietly(pendingJsonFile);
                 deleteIfExistsQuietly(pendingTxtFile);
+                deleteIfExistsQuietly(pendingVerFile);
                 jsonFile = null;
-                txtFile = null;
+                txtFile  = null;
+                verFile  = null;
                 dbMessage = "Persistence failed: " + t.getMessage();
                 if (t instanceof VirtualMachineError) {
                     throw (VirtualMachineError) t;
@@ -1088,12 +1202,13 @@ public class TurnScorer {
         }
 
         if (jsonFile != null && txtFile != null) {
-            printOutputFilesBanner(jsonFile, txtFile);
+            printOutputFilesBanner(jsonFile, txtFile, verFile);
         }
 
         return new RunResult(
             jsonFile,
             txtFile,
+            verFile,
             resolved.size(),
             scored.size(),
             interactions.size(),
@@ -1117,13 +1232,14 @@ public class TurnScorer {
         }
     }
 
-    private static void printOutputFilesBanner(Path jsonFile, Path txtFile) {
+    private static void printOutputFilesBanner(Path jsonFile, Path txtFile, Path verFile) {
         System.out.println("=".repeat(70));
         System.out.println("  OUTPUT FILES");
         System.out.println("=".repeat(70));
         System.out.printf("  JSON: %s%n", jsonFile);
         System.out.printf("  TXT:  %s%n", txtFile);
-        System.out.printf("  Naming: score_<inputLabel>_<timestamp>.{json,txt}%n");
+        if (verFile != null) System.out.printf("  VER:  %s%n", verFile);
+        System.out.printf("  Naming: score_<inputLabel>_<timestamp>.{json,txt,_sentences.txt}%n");
         System.out.println();
     }
 

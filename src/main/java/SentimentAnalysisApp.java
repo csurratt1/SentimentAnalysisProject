@@ -84,6 +84,7 @@ public class SentimentAnalysisApp {
     private JLabel dbRunValue;
     private JLabel dbTurnsValue;
     private JLabel dbScoresValue;
+    private JLabel dbSentencesValue;
     private JLabel dbReplaceValue;
 
     // ── Batch state ───────────────────────────────────────────────────────
@@ -280,22 +281,24 @@ public class SentimentAnalysisApp {
         heading.setFont(new Font("Segoe UI", Font.BOLD, 12));
         section.add(heading, BorderLayout.NORTH);
 
-        JPanel cards = new JPanel(new GridLayout(1, 6, 10, 0));
+        JPanel cards = new JPanel(new GridLayout(1, 7, 10, 0));
         cards.setBackground(COLOR_BG);
 
-        dbStatusValue  = createSummaryValueLabel("—");
-        dbHearingValue = createSummaryValueLabel("—");
-        dbRunValue     = createSummaryValueLabel("—");
-        dbTurnsValue   = createSummaryValueLabel("—");
-        dbScoresValue  = createSummaryValueLabel("—");
-        dbReplaceValue = createSummaryValueLabel("—");
+        dbStatusValue    = createSummaryValueLabel("—");
+        dbHearingValue   = createSummaryValueLabel("—");
+        dbRunValue       = createSummaryValueLabel("—");
+        dbTurnsValue     = createSummaryValueLabel("—");
+        dbScoresValue    = createSummaryValueLabel("—");
+        dbSentencesValue = createSummaryValueLabel("—");
+        dbReplaceValue   = createSummaryValueLabel("—");
 
-        cards.add(createSummaryCard("Status",          dbStatusValue));
-        cards.add(createSummaryCard("Hearing ID",      dbHearingValue));
-        cards.add(createSummaryCard("Run ID",          dbRunValue));
-        cards.add(createSummaryCard("Turns Inserted",  dbTurnsValue));
-        cards.add(createSummaryCard("Scores Inserted", dbScoresValue));
-        cards.add(createSummaryCard("Replaced Prior",  dbReplaceValue));
+        cards.add(createSummaryCard("Status",            dbStatusValue));
+        cards.add(createSummaryCard("Hearing ID",        dbHearingValue));
+        cards.add(createSummaryCard("Run ID",            dbRunValue));
+        cards.add(createSummaryCard("Turns Inserted",    dbTurnsValue));
+        cards.add(createSummaryCard("Scores Inserted",   dbScoresValue));
+        cards.add(createSummaryCard("Sentences Stored",  dbSentencesValue));
+        cards.add(createSummaryCard("Replaced Prior",    dbReplaceValue));
 
         section.add(cards, BorderLayout.CENTER);
         return section;
@@ -952,7 +955,8 @@ public class SentimentAnalysisApp {
                     if (previewBeforeCommit) {
                         String textPreview = TurnScorer.buildTextPreview(analysis, false);
                         String jsonPreview = TurnScorer.buildJsonPreview(analysis);
-                        if (!showPreviewAndConfirm(textPreview, jsonPreview)) {
+                        String verPreview  = TurnScorer.buildVerificationPreview(analysis);
+                        if (!showPreviewAndConfirm(textPreview, jsonPreview, verPreview)) {
                             appendLog("Run discarded after preview.");
                             clearDbSummary("Discarded");
                             setRunControlsEnabled(true);
@@ -986,6 +990,7 @@ public class SentimentAnalysisApp {
                         + " | Scored: " + result.getScoredTurns()
                         + " | Pairs: " + result.getInteractionPairs());
                     if (result.getTextFile() != null) appendLog("Report: " + result.getTextFile().getFileName());
+                    if (result.getVerificationFile() != null) appendLog("Verification: " + result.getVerificationFile().getFileName());
                     appendLog("DB: " + result.getDbMessage());
                     updateDbSummary(result);
                     refreshLists();
@@ -1000,7 +1005,8 @@ public class SentimentAnalysisApp {
         worker.execute();
     }
 
-    private boolean showPreviewAndConfirm(String textPreview, String jsonPreview) {
+    private boolean showPreviewAndConfirm(String textPreview, String jsonPreview,
+                                          String verPreview) {
         JTabbedPane tabs = new JTabbedPane();
         tabs.setBackground(COLOR_SURFACE);
         tabs.setForeground(COLOR_TEXT);
@@ -1015,8 +1021,14 @@ public class SentimentAnalysisApp {
         jsonArea.setFont(new Font("Consolas", Font.PLAIN, 12));
         jsonArea.setCaretPosition(0);
 
-        tabs.addTab("Text Report", new JScrollPane(textArea));
-        tabs.addTab("JSON",        new JScrollPane(jsonArea));
+        JTextArea verArea = new JTextArea(verPreview, 28, 100);
+        verArea.setEditable(false);
+        verArea.setFont(new Font("Consolas", Font.PLAIN, 12));
+        verArea.setCaretPosition(0);
+
+        tabs.addTab("Text Report",              new JScrollPane(textArea));
+        tabs.addTab("JSON",                     new JScrollPane(jsonArea));
+        tabs.addTab("Per-Sentence Verification", new JScrollPane(verArea));
 
         return JOptionPane.showConfirmDialog(appFrame, tabs,
             "Preview — Confirm Save", JOptionPane.OK_CANCEL_OPTION,
@@ -1130,6 +1142,7 @@ public class SentimentAnalysisApp {
         dbRunValue.setText(String.valueOf(s.getScoringRunId()));
         dbTurnsValue.setText(String.valueOf(s.getTurnsInserted()));
         dbScoresValue.setText(String.valueOf(s.getTurnScoresInserted()));
+        dbSentencesValue.setText(String.valueOf(s.getSentencesInserted()));
         dbReplaceValue.setText(s.isReplacedExistingRun() ? "Yes" : "No");
     }
 
@@ -1141,6 +1154,7 @@ public class SentimentAnalysisApp {
         dbRunValue.setText("—");
         dbTurnsValue.setText("—");
         dbScoresValue.setText("—");
+        dbSentencesValue.setText("—");
         dbReplaceValue.setText("—");
     }
 
